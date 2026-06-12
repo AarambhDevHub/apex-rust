@@ -6,18 +6,27 @@ use crate::error::{ApexError, Result};
 use crate::model::PlainLinear;
 use crate::tensor;
 
+/// Minimal native vision encoder that converts image patches into vision tokens.
 #[derive(Clone)]
 pub struct NativeVisionEncoder {
+    /// Expected square image size.
     pub image_size: usize,
+    /// Square patch size.
     pub patch_size: usize,
+    /// Number of input channels.
     pub channels: usize,
+    /// Vision token hidden size.
     pub d_vision: usize,
+    /// Linear projection applied to flattened patches.
     pub patch_proj: PlainLinear,
+    /// Learned CLS token prepended to patch tokens.
     pub cls_token: Tensor,
+    /// Learned positional embedding for CLS plus patch tokens.
     pub pos_embed: Tensor,
 }
 
 impl NativeVisionEncoder {
+    /// Creates the patch encoder and learned vision embeddings.
     pub fn new(cfg: &ApexConfig, device: &Device) -> Result<Self> {
         let v = &cfg.vision;
         let patches_per_side = v.image_size / v.patch_size;
@@ -39,6 +48,7 @@ impl NativeVisionEncoder {
         })
     }
 
+    /// Encodes an image tensor `[B,C,H,W]` into `[B,N+1,Dv]` tokens.
     pub fn forward(&self, image: &Tensor) -> Result<Tensor> {
         let dims = image.dims();
         if dims.len() != 4 {
@@ -82,6 +92,7 @@ impl NativeVisionEncoder {
         Ok(tokens.broadcast_add(&self.pos_embed)?)
     }
 
+    /// Returns the number of vision encoder parameters.
     pub fn parameters(&self) -> usize {
         self.patch_proj.parameters() + self.cls_token.elem_count() + self.pos_embed.elem_count()
     }

@@ -1,3 +1,5 @@
+//! Configuration schema, preset builders, and layer-placement helpers.
+
 mod presets;
 mod schema;
 

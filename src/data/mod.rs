@@ -1,3 +1,5 @@
+//! Dataset record types and JSONL readers for pretraining, SFT, preferences, and vision.
+
 mod readers;
 mod types;
 

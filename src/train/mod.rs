@@ -1,3 +1,5 @@
+//! Training helpers: losses, cosine scheduler, checkpoints, and dry-run steps.
+
 mod checkpoint;
 mod losses;
 mod runner;

@@ -3,17 +3,25 @@ use serde::{Deserialize, Serialize};
 use crate::config::ApexConfig;
 use crate::model::{ApexModel, AttentionKind, FfnKind};
 
+/// Parameter counts and adapter module counts for one model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParameterReport {
+    /// Total represented parameters.
     pub total_parameters: usize,
+    /// Estimated parameters active for one token path.
     pub active_parameters: usize,
+    /// Parameters considered trainable by the current configuration.
     pub trainable_parameters: usize,
+    /// Number of LoRA-family adapter modules.
     pub lora_modules: usize,
+    /// Number of quantized adapter modules.
     pub qlora_modules: usize,
+    /// Number of DoRA-family adapter modules.
     pub dora_modules: usize,
 }
 
 impl ParameterReport {
+    /// Builds a parameter report from a model instance.
     pub fn from_model(model: &ApexModel) -> Self {
         Self {
             total_parameters: model.total_parameters(),
@@ -26,24 +34,36 @@ impl ParameterReport {
     }
 }
 
+/// Per-layer architecture and parameter summary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerReport {
+    /// Zero-based layer index.
     pub layer_idx: usize,
+    /// Attention implementation name.
     pub attention: String,
+    /// Feed-forward implementation name.
     pub ffn: String,
+    /// Whether a skip gate is present.
     pub skip_gate: bool,
+    /// Layer parameter count.
     pub parameters: usize,
 }
 
+/// Full inspection report for model structure and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelInspection {
+    /// Human-readable model family label.
     pub model: String,
+    /// Configuration used to instantiate the model.
     pub config: ApexConfig,
+    /// Parameter summary.
     pub parameters: ParameterReport,
+    /// Per-layer summaries.
     pub layers: Vec<LayerReport>,
 }
 
 impl ModelInspection {
+    /// Builds an inspection report from a model instance.
     pub fn from_model(model: &ApexModel) -> Self {
         let layers = model
             .blocks
@@ -76,6 +96,7 @@ impl ModelInspection {
     }
 }
 
+/// Returns a human-readable architecture summary.
 pub fn architecture_text(model: &ApexModel) -> String {
     let mut out = String::new();
     out.push_str("APEX-1 Rust Candle\n");
@@ -117,14 +138,20 @@ pub fn architecture_text(model: &ApexModel) -> String {
     out
 }
 
+/// Rough floating-point operation estimate.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct FlopsEstimate {
+    /// Sequence length used by the estimate.
     pub sequence_length: usize,
+    /// Batch size used by the estimate.
     pub batch_size: usize,
+    /// Estimated forward-pass FLOPs.
     pub forward_flops: f64,
+    /// Estimated training FLOPs, approximated as three forward passes.
     pub train_flops: f64,
 }
 
+/// Estimates forward and training FLOPs from model dimensions.
 pub fn estimate_flops(
     cfg: &ApexConfig,
     batch_size: usize,

@@ -8,19 +8,29 @@ use super::ffn::{DenseFfn, FfnKind, MoeFfn};
 use super::norm::RmsNorm;
 use super::skip_gate::SkipGate;
 
+/// One transformer block with attention, FFN/MoE, RMSNorm, and optional skip gate.
 #[derive(Clone)]
 pub struct TransformerBlock {
+    /// Zero-based layer index.
     pub layer_idx: usize,
+    /// Whether this block uses global MLA attention.
     pub is_global: bool,
+    /// Whether this block uses a MoE feed-forward layer.
     pub is_moe: bool,
+    /// Pre-attention normalization.
     pub norm1: RmsNorm,
+    /// Pre-FFN normalization.
     pub norm2: RmsNorm,
+    /// Attention implementation selected for this layer.
     pub attn: AttentionKind,
+    /// Feed-forward implementation selected for this layer.
     pub ffn: FfnKind,
+    /// Optional token-level gate for skipping FFN contribution.
     pub skip_gate: Option<SkipGate>,
 }
 
 impl TransformerBlock {
+    /// Creates a transformer block according to layer-placement rules.
     pub fn new(layer_idx: usize, cfg: &ApexConfig, device: &Device) -> Result<Self> {
         let is_global = is_global_layer(layer_idx, cfg.attention.global_layer_freq);
         let is_moe = is_moe_layer(layer_idx, &cfg.moe);
@@ -69,6 +79,7 @@ impl TransformerBlock {
         })
     }
 
+    /// Runs attention, residual additions, FFN/MoE, and optional skip gating.
     pub fn forward(
         &mut self,
         x: &Tensor,
@@ -92,6 +103,7 @@ impl TransformerBlock {
         Ok((y, new_cache))
     }
 
+    /// Returns total represented parameters.
     pub fn parameters(&self) -> usize {
         self.norm1.parameters()
             + self.norm2.parameters()
@@ -104,6 +116,7 @@ impl TransformerBlock {
                 .unwrap_or(0)
     }
 
+    /// Returns trainable parameters under the current adapter policy.
     pub fn trainable_parameters(&self) -> usize {
         self.norm1.parameters()
             + self.norm2.parameters()
@@ -116,11 +129,13 @@ impl TransformerBlock {
                 .unwrap_or(0)
     }
 
+    /// Merges and unloads adapter layers in attention and FFN modules.
     pub fn merge_and_unload(&mut self) -> Result<()> {
         self.attn.merge_and_unload()?;
         self.ffn.merge_and_unload()
     }
 
+    /// Appends full block tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) -> Result<()> {
         out.push((format!("{prefix}.norm1.weight"), self.norm1.weight.clone()));
         out.push((format!("{prefix}.norm2.weight"), self.norm2.weight.clone()));
@@ -135,6 +150,7 @@ impl TransformerBlock {
         Ok(())
     }
 
+    /// Appends only adapter tensors in this block.
     pub fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         self.attn.adapter_tensors(&format!("{prefix}.attn"), out);
         self.ffn.adapter_tensors(&format!("{prefix}.ffn"), out);

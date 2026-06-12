@@ -1,3 +1,5 @@
+//! Autoregressive generation, sampling filters, and speculative-token helpers.
+
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -8,21 +10,36 @@ use crate::error::Result;
 use crate::model::{cache_len, ApexModel, KvCache};
 use crate::tensor;
 
+/// Sampling and generation options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
+    /// Maximum number of new tokens to produce.
     pub max_new_tokens: usize,
+    /// Default sampling temperature.
     pub temperature: f64,
+    /// Nucleus sampling probability cutoff.
     pub top_p: f64,
+    /// Top-k sampling cutoff; zero disables top-k.
     pub top_k: usize,
+    /// Penalty applied to already generated token logits.
     pub repetition_penalty: f64,
+    /// Enables thinking-token temperature switching.
     pub enable_thinking: bool,
+    /// Maximum thinking-token count before an end-thinking token is forced.
     pub max_thinking_tokens: usize,
+    /// Temperature used inside the thinking span.
     pub thinking_temperature: f64,
+    /// Temperature used after the thinking span.
     pub output_temperature: f64,
+    /// Uses the speculative-generation entry point.
     pub use_speculative: bool,
+    /// Token ID that stops generation.
     pub eos_token_id: u32,
+    /// Padding token ID carried for tokenizer compatibility.
     pub pad_token_id: u32,
+    /// Thinking-start token ID.
     pub thinking_start_id: u32,
+    /// Thinking-end token ID.
     pub thinking_end_id: u32,
 }
 
@@ -47,14 +64,20 @@ impl Default for GenerationConfig {
     }
 }
 
+/// Generated token IDs and simple stopping statistics.
 #[derive(Debug, Clone, Default)]
 pub struct GenerationOutput {
+    /// Newly generated token IDs.
     pub token_ids: Vec<u32>,
+    /// Number of tokens produced while in thinking mode.
     pub thinking_tokens: usize,
+    /// Total number of generated tokens.
     pub total_tokens: usize,
+    /// Whether generation stopped on EOS.
     pub finished: bool,
 }
 
+/// Applies repetition penalty in place to token logits.
 pub fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f64) {
     if (penalty - 1.0).abs() < f64::EPSILON {
         return;
@@ -71,6 +94,7 @@ pub fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: 
     }
 }
 
+/// Masks logits outside the largest `top_k` values.
 pub fn apply_top_k(logits: &mut [f32], top_k: usize) {
     if top_k == 0 || top_k >= logits.len() {
         return;
@@ -87,6 +111,7 @@ pub fn apply_top_k(logits: &mut [f32], top_k: usize) {
     }
 }
 
+/// Masks logits outside the smallest set whose probabilities exceed `top_p`.
 pub fn apply_top_p(logits: &mut [f32], top_p: f64) {
     if top_p >= 1.0 {
         return;
@@ -110,6 +135,7 @@ pub fn apply_top_p(logits: &mut [f32], top_p: f64) {
     }
 }
 
+/// Samples one token from logits after repetition, top-k, top-p, and temperature.
 pub fn sample_next_token(
     raw_logits: &[f32],
     cfg: &GenerationConfig,
@@ -140,16 +166,21 @@ pub fn sample_next_token(
     }
 }
 
+/// Stateful generator borrowing a mutable model during decoding.
 pub struct ApexGenerator<'a> {
+    /// Model used for forward passes and KV-cache updates.
     pub model: &'a mut ApexModel,
+    /// Sampling and token-control settings.
     pub config: GenerationConfig,
 }
 
 impl<'a> ApexGenerator<'a> {
+    /// Creates a generator for the provided model and config.
     pub fn new(model: &'a mut ApexModel, config: GenerationConfig) -> Self {
         Self { model, config }
     }
 
+    /// Generates tokens from an input prompt with incremental KV-cache reuse.
     pub fn generate(&mut self, input_ids: Vec<u32>, prefix_len: usize) -> Result<GenerationOutput> {
         if self.config.use_speculative {
             return self.generate_with_speculative(input_ids, prefix_len);
@@ -202,6 +233,7 @@ impl<'a> ApexGenerator<'a> {
         })
     }
 
+    /// Runs the speculative-generation entry point.
     pub fn generate_with_speculative(
         &mut self,
         input_ids: Vec<u32>,
@@ -213,6 +245,7 @@ impl<'a> ApexGenerator<'a> {
         Ok(out)
     }
 
+    /// Returns the previous sequence length represented by a KV-cache set.
     pub fn prev_len(kv_caches: &[KvCache]) -> usize {
         kv_caches.first().map(cache_len).unwrap_or(0)
     }

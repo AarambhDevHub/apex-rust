@@ -6,17 +6,25 @@ use crate::error::{ApexError, Result};
 use crate::model::PlainLinear;
 use crate::tensor;
 
+/// Projects vision tokens into the language model hidden space.
 #[derive(Clone)]
 pub struct VisionToTextProjector {
+    /// Projector mode, currently `perceiver` or `mlp`.
     pub projector_type: String,
+    /// Number of visual tokens emitted for insertion into text.
     pub n_visual_tokens: usize,
+    /// Input projection from vision hidden size to projector hidden size.
     pub input_proj: PlainLinear,
+    /// Optional hidden MLP layers.
     pub hidden_layers: Vec<PlainLinear>,
+    /// Output projection from projector hidden size to text hidden size.
     pub output_proj: PlainLinear,
+    /// Learned latent tokens used by the perceiver-style selector.
     pub latents: Option<Tensor>,
 }
 
 impl VisionToTextProjector {
+    /// Creates a projector from vision and model config.
     pub fn new(cfg: &ApexConfig, device: &Device) -> Result<Self> {
         let v = &cfg.vision;
         let hidden = v.projector_hidden_dim;
@@ -62,6 +70,7 @@ impl VisionToTextProjector {
         })
     }
 
+    /// Selects visual tokens and projects them into text embedding space.
     pub fn forward(&self, vision_tokens: &Tensor) -> Result<Tensor> {
         let selected = if self.projector_type == "perceiver" {
             self.perceiver_select(vision_tokens)?
@@ -75,6 +84,7 @@ impl VisionToTextProjector {
         self.output_proj.forward(&h)
     }
 
+    /// Selects tokens using learned latents plus pooled/source token features.
     fn perceiver_select(&self, vision_tokens: &Tensor) -> Result<Tensor> {
         let dims = vision_tokens.dims();
         if dims.len() != 3 {
@@ -113,6 +123,7 @@ impl VisionToTextProjector {
         )?)
     }
 
+    /// Selects evenly spaced vision tokens for the MLP projector path.
     fn mlp_select(&self, vision_tokens: &Tensor) -> Result<Tensor> {
         let dims = vision_tokens.dims();
         if dims.len() != 3 {
@@ -136,6 +147,7 @@ impl VisionToTextProjector {
         )?)
     }
 
+    /// Returns the number of projector parameters.
     pub fn parameters(&self) -> usize {
         self.input_proj.parameters()
             + self.output_proj.parameters()
@@ -148,6 +160,7 @@ impl VisionToTextProjector {
     }
 }
 
+/// Mean-pools `[B,S,D]` tokens across the sequence dimension.
 fn mean_tokens(tokens: &Tensor) -> Result<Tensor> {
     let dims = tokens.dims();
     let values = tokens.to_vec3::<f32>()?;

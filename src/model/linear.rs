@@ -5,15 +5,21 @@ use crate::config::{ApexConfig, PeftConfig, PeftMethod};
 use crate::error::{ApexError, Result};
 use crate::tensor;
 
+/// Standard trainable linear projection.
 #[derive(Clone)]
 pub struct PlainLinear {
+    /// Stable module name used for targeting and checkpoint keys.
     pub name: String,
+    /// Weight matrix with shape `[out_features, in_features]`.
     pub weight: Tensor,
+    /// Optional output bias.
     pub bias: Option<Tensor>,
+    /// Whether the base weight counts as trainable under PEFT.
     pub trainable: bool,
 }
 
 impl PlainLinear {
+    /// Creates a normally initialized linear layer.
     pub fn new(
         name: impl Into<String>,
         in_features: usize,
@@ -33,14 +39,17 @@ impl PlainLinear {
         })
     }
 
+    /// Applies the linear projection to the last dimension of `x`.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         tensor::linear(x, &self.weight, self.bias.as_ref())
     }
 
+    /// Returns the number of stored weight and bias parameters.
     pub fn parameters(&self) -> usize {
         self.weight.elem_count() + self.bias.as_ref().map(Tensor::elem_count).unwrap_or(0)
     }
 
+    /// Appends this layer's tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         out.push((format!("{prefix}.weight"), self.weight.clone()));
         if let Some(bias) = &self.bias {
@@ -49,14 +58,22 @@ impl PlainLinear {
     }
 }
 
+/// Row-wise 4-bit quantized weight payload.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct QuantizedWeight4Bit {
+    /// Packed two-per-byte 4-bit codebook indices.
     pub qweight: Vec<u8>,
+    /// Original matrix shape `(out_features, in_features)`.
     pub shape: (usize, usize),
+    /// Codebook type, usually `nf4` or `fp4`.
     pub quant_type: String,
+    /// Whether row scales are themselves quantized.
     pub double_quant: bool,
+    /// Per-row scales when double quantization is disabled.
     pub scales: Vec<f32>,
+    /// Quantized per-row scales when double quantization is enabled.
     pub scale_q: Vec<u8>,
+    /// Shared scale used to reconstruct `scale_q`.
     pub scale_scale: f32,
 }
 
@@ -65,6 +82,7 @@ const NF4_CODEBOOK: [f32; 16] = [
     0.0795803, 0.1609302, 0.2461123, 0.3379152, 0.4407098, 0.562_617, 0.7229568, 1.0000000,
 ];
 
+/// Returns the 16-value codebook for the requested 4-bit quantization type.
 pub fn codebook(quant_type: &str) -> Result<[f32; 16]> {
     match quant_type {
         "nf4" => Ok(NF4_CODEBOOK),
@@ -79,6 +97,7 @@ pub fn codebook(quant_type: &str) -> Result<[f32; 16]> {
     }
 }
 
+/// Packs 4-bit indices into bytes using low/high nibbles.
 pub fn pack_4bit_indices(indices: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(indices.len().div_ceil(2));
     for pair in indices.chunks(2) {
@@ -89,6 +108,7 @@ pub fn pack_4bit_indices(indices: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Unpacks byte-packed 4-bit indices into one index per value.
 pub fn unpack_4bit_indices(packed: &[u8], num_values: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(packed.len() * 2);
     for &byte in packed {
@@ -99,6 +119,7 @@ pub fn unpack_4bit_indices(packed: &[u8], num_values: usize) -> Vec<u8> {
     out
 }
 
+/// Quantizes a rank-2 weight tensor row-wise into 4-bit codebook indices.
 pub fn quantize_4bit_weight(
     weight: &Tensor,
     quant_type: &str,
@@ -153,6 +174,7 @@ pub fn quantize_4bit_weight(
     })
 }
 
+/// Reconstructs a floating-point weight tensor from a 4-bit payload.
 pub fn dequantize_4bit_weight(q: &QuantizedWeight4Bit, device: &Device) -> Result<Tensor> {
     let cb = codebook(&q.quant_type)?;
     let (out_features, in_features) = q.shape;
@@ -176,14 +198,19 @@ pub fn dequantize_4bit_weight(q: &QuantizedWeight4Bit, device: &Device) -> Resul
     )?)
 }
 
+/// Linear layer backed by a 4-bit quantized base weight.
 #[derive(Clone)]
 pub struct QuantizedLinear4Bit {
+    /// Stable module name used for checkpoint keys.
     pub name: String,
+    /// Quantized base weight.
     pub weight: QuantizedWeight4Bit,
+    /// Optional bias stored in floating point.
     pub bias: Option<Tensor>,
 }
 
 impl QuantizedLinear4Bit {
+    /// Quantizes a plain linear layer into a 4-bit layer.
     pub fn from_plain(base: &PlainLinear, quant_type: &str, double_quant: bool) -> Result<Self> {
         Ok(Self {
             name: base.name.clone(),
@@ -192,15 +219,18 @@ impl QuantizedLinear4Bit {
         })
     }
 
+    /// Dequantizes the base weight on the requested device.
     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
         dequantize_4bit_weight(&self.weight, device)
     }
 
+    /// Applies the dequantized linear projection.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let weight = self.dequantize(x.device())?;
         tensor::linear(x, &weight, self.bias.as_ref())
     }
 
+    /// Returns original bytes, quantized bytes, and compression ratio.
     pub fn storage_summary(&self) -> (usize, usize, f64) {
         let float_bytes = self.weight.shape.0 * self.weight.shape.1 * 4;
         let mut quant_bytes = self.weight.qweight.len();
@@ -214,13 +244,17 @@ impl QuantizedLinear4Bit {
     }
 }
 
+/// Base layer used below LoRA/DoRA adapters.
 #[derive(Clone)]
 pub enum BaseLinear {
+    /// Floating-point base projection.
     Plain(PlainLinear),
+    /// Four-bit quantized base projection.
     Quantized(QuantizedLinear4Bit),
 }
 
 impl BaseLinear {
+    /// Applies the base projection.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::Plain(p) => p.forward(x),
@@ -228,6 +262,7 @@ impl BaseLinear {
         }
     }
 
+    /// Returns the floating-point weight, dequantizing if necessary.
     pub fn weight(&self, device: &Device) -> Result<Tensor> {
         match self {
             Self::Plain(p) => Ok(p.weight.clone()),
@@ -235,6 +270,7 @@ impl BaseLinear {
         }
     }
 
+    /// Returns the optional base bias.
     pub fn bias(&self) -> Option<&Tensor> {
         match self {
             Self::Plain(p) => p.bias.as_ref(),
@@ -242,6 +278,7 @@ impl BaseLinear {
         }
     }
 
+    /// Converts the base into a plain floating-point layer.
     pub fn into_plain(self, device: &Device) -> Result<PlainLinear> {
         match self {
             Self::Plain(p) => Ok(p),
@@ -259,22 +296,33 @@ impl BaseLinear {
     }
 }
 
+/// Linear layer that may include LoRA, QLoRA, DoRA, or QDoRA adapters.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum LinearLayer {
+    /// Plain floating-point linear projection.
     Plain(PlainLinear),
+    /// Adapter-wrapped base projection.
     Lora {
+        /// Frozen or trainable base layer.
         base: BaseLinear,
+        /// Low-rank input projection.
         lora_a: PlainLinear,
+        /// Low-rank output projection.
         lora_b: PlainLinear,
+        /// Adapter scale `alpha / rank`.
         scaling: f64,
+        /// Whether adapter weights have been merged into the base.
         merged: bool,
+        /// PEFT method used by this layer.
         method: PeftMethod,
+        /// DoRA row magnitudes, present for DoRA/QDoRA.
         dora_magnitude: Option<Tensor>,
     },
 }
 
 impl LinearLayer {
+    /// Creates a linear layer and wraps it with PEFT adapters when targeted.
     pub fn new(
         name: &str,
         in_features: usize,
@@ -291,6 +339,7 @@ impl LinearLayer {
         }
     }
 
+    /// Builds the requested adapter wrapper around a plain base layer.
     fn wrap(base: PlainLinear, peft: &PeftConfig, device: &Device) -> Result<Self> {
         let in_features = base.weight.dim(1)?;
         let out_features = base.weight.dim(0)?;
@@ -332,6 +381,7 @@ impl LinearLayer {
         })
     }
 
+    /// Applies the base projection plus active adapter update.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::Plain(p) => p.forward(x),
@@ -371,10 +421,12 @@ impl LinearLayer {
         }
     }
 
+    /// Returns true when this layer carries a LoRA-family adapter.
     pub fn is_lora(&self) -> bool {
         matches!(self, Self::Lora { .. })
     }
 
+    /// Returns true when the adapter uses a quantized base layer.
     pub fn is_quantized_adapter(&self) -> bool {
         matches!(
             self,
@@ -385,6 +437,7 @@ impl LinearLayer {
         )
     }
 
+    /// Returns true when this layer uses DoRA-style magnitudes.
     pub fn is_dora(&self) -> bool {
         matches!(
             self,
@@ -395,6 +448,7 @@ impl LinearLayer {
         )
     }
 
+    /// Merges adapter weights into a plain base layer and removes adapter state.
     pub fn merge_and_unload(&mut self) -> Result<()> {
         let replacement = match self.clone() {
             Self::Plain(_) => return Ok(()),
@@ -434,6 +488,7 @@ impl LinearLayer {
         Ok(())
     }
 
+    /// Returns total represented parameters including frozen base parameters.
     pub fn parameters(&self) -> usize {
         match self {
             Self::Plain(p) => p.parameters(),
@@ -456,6 +511,7 @@ impl LinearLayer {
         }
     }
 
+    /// Returns parameters that are trainable under the current adapter policy.
     pub fn trainable_parameters(&self) -> usize {
         match self {
             Self::Plain(p) => {
@@ -478,6 +534,7 @@ impl LinearLayer {
         }
     }
 
+    /// Appends full layer tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) -> Result<()> {
         match self {
             Self::Plain(p) => p.named_tensors(prefix, out),
@@ -510,6 +567,7 @@ impl LinearLayer {
         Ok(())
     }
 
+    /// Appends only adapter tensors to a named checkpoint list.
     pub fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         if let Self::Lora {
             lora_a,

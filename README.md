@@ -131,6 +131,7 @@ src/
   eval/                Metrics, perplexity, benchmark helpers
   tensor/              Candle tensor utilities
   utils/               Inspection, FLOPs, parameter reports
+configs/               YAML presets for text and vision model sizes
 examples/              Small runnable examples
 tests/                 Core and CLI tests
 ```
@@ -181,6 +182,33 @@ Use a custom config:
 ```bash
 cargo run -- inspect --config configs/tiny.yaml
 ```
+
+Built-in YAML presets:
+
+| Text preset | Vision preset | Purpose |
+|---|---|---|
+| `configs/tiny.yaml` | `configs/tiny_vision.yaml` | Fast CPU checks and examples |
+| `configs/small.yaml` | `configs/small_vision.yaml` | Small experiments |
+| `configs/medium.yaml` | `configs/medium_vision.yaml` | Mid-size training runs |
+| `configs/large.yaml` | `configs/large_vision.yaml` | Large model configuration |
+
+---
+
+## Examples
+
+Runnable examples live in `examples/`:
+
+```bash
+cargo run --example forward_pass
+cargo run --example generate
+cargo run --example inspect_model
+cargo run --example tokenizer_chat
+cargo run --example peft_summary
+cargo run --example vision_forward
+```
+
+Each example uses tiny CPU-friendly settings and is intended to show one
+subsystem clearly.
 
 ---
 

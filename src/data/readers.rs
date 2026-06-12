@@ -9,22 +9,26 @@ use crate::tokenizer::{special, ApexTokenizer, ChatMessage};
 
 use super::types::{PreferenceSample, PretrainSample, SftSample, VisionInstructionSample};
 
+/// Raw pretraining JSONL row with a single `text` field.
 #[derive(Debug, Deserialize)]
 struct TextRow {
     text: String,
 }
 
+/// Raw chat message row used by SFT and vision-message datasets.
 #[derive(Debug, Deserialize)]
 struct MessageRow {
     role: String,
     content: String,
 }
 
+/// Raw SFT JSONL row containing a list of chat messages.
 #[derive(Debug, Deserialize)]
 struct SftRow {
     messages: Vec<MessageRow>,
 }
 
+/// Raw preference row supporting common alias names for prompt and responses.
 #[derive(Debug, Deserialize)]
 struct PreferenceRow {
     prompt: Option<String>,
@@ -38,6 +42,7 @@ struct PreferenceRow {
     dispreferred: Option<String>,
 }
 
+/// Raw vision instruction row supporting prompt/response or chat-message schema.
 #[derive(Debug, Deserialize)]
 struct VisionRow {
     image: String,
@@ -46,6 +51,7 @@ struct VisionRow {
     messages: Option<Vec<MessageRow>>,
 }
 
+/// Reads pretraining JSONL and packs all text into fixed-length token blocks.
 pub fn read_pretrain_jsonl(
     path: impl AsRef<Path>,
     tokenizer: &ApexTokenizer,
@@ -59,6 +65,7 @@ pub fn read_pretrain_jsonl(
     Ok(pack_tokens(&tokens, seq_len, tokenizer.pad_token_id()))
 }
 
+/// Packs a token stream into padded fixed-length pretraining samples.
 pub fn pack_tokens(tokens: &[u32], seq_len: usize, pad_id: u32) -> Vec<PretrainSample> {
     if seq_len == 0 {
         return Vec::new();
@@ -85,6 +92,7 @@ pub fn pack_tokens(tokens: &[u32], seq_len: usize, pad_id: u32) -> Vec<PretrainS
     samples
 }
 
+/// Reads SFT JSONL with `messages` rows and produces role-masked token samples.
 pub fn read_sft_jsonl(
     path: impl AsRef<Path>,
     tokenizer: &ApexTokenizer,
@@ -114,6 +122,7 @@ pub fn read_sft_jsonl(
     Ok(out)
 }
 
+/// Reads preference JSONL using accepted alias fields for prompt/chosen/rejected.
 pub fn read_preference_jsonl(
     path: impl AsRef<Path>,
     tokenizer: &ApexTokenizer,
@@ -144,6 +153,7 @@ pub fn read_preference_jsonl(
     Ok(out)
 }
 
+/// Formats one preference example and returns prompt/chosen/rejected token sequences.
 pub fn format_preference_example(
     tokenizer: &ApexTokenizer,
     prompt: &str,
@@ -193,6 +203,7 @@ pub fn format_preference_example(
     })
 }
 
+/// Reads vision JSONL rows and resolves image paths relative to an optional root.
 pub fn read_vision_jsonl(
     path: impl AsRef<Path>,
     image_root: Option<impl AsRef<Path>>,

@@ -9,6 +9,7 @@ use crate::error::{ApexError, Result};
 
 use super::constants::SPECIAL_TOKENS;
 
+/// Trains a byte-level BPE tokenizer from a text file and writes `tokenizer.json`.
 pub fn train_bpe_tokenizer(
     input: impl AsRef<Path>,
     output: impl AsRef<Path>,

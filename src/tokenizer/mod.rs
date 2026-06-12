@@ -1,3 +1,5 @@
+//! Tokenizer constants, chat formatting, fallback encoding, and BPE training.
+
 mod constants;
 mod core;
 mod trainer;

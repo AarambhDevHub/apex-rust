@@ -1,3 +1,5 @@
+//! Candle model layers and the APEX transformer implementation.
+
 mod apex_model;
 mod attention;
 mod block;

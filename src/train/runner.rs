@@ -3,6 +3,7 @@ use crate::model::ApexModel;
 
 use super::losses::{compute_pretrain_loss, LossMetrics};
 
+/// Runs one forward/loss step without updating model parameters.
 pub fn dry_run_pretrain_step(model: &mut ApexModel, tokens: &[Vec<u32>]) -> Result<LossMetrics> {
     let out = model.forward(tokens, None, 0, None, false)?;
     compute_pretrain_loss(

@@ -8,30 +8,48 @@ use super::linear::LinearLayer;
 use super::mask::additive_mask;
 use super::rope::{apply_rope_pair, apply_rope_single};
 
+/// Per-layer key/value cache for incremental decoding.
 #[derive(Clone)]
 pub enum KvCache {
+    /// MLA cache stores compressed key/value latents and rotary keys.
     Mla { c_kv: Tensor, k_rope: Tensor },
+    /// GQA cache stores projected key and value tensors.
     Gqa { k: Tensor, v: Tensor },
 }
 
+/// Multi-head latent attention block used for global layers.
 #[derive(Clone)]
 pub struct MlaAttention {
+    /// Number of query heads.
     pub n_heads_q: usize,
+    /// Number of key/value heads.
     pub n_heads_kv: usize,
+    /// Content head size.
     pub d_head: usize,
+    /// Rotary-only head size.
     pub d_head_rope: usize,
+    /// Compressed key/value latent width.
     pub d_kv_compressed: usize,
+    /// Down-projection from hidden states into compressed key/value latents.
     pub w_dkv: LinearLayer,
+    /// Up-projection from compressed latents to content keys.
     pub w_uk: LinearLayer,
+    /// Up-projection from compressed latents to values.
     pub w_uv: LinearLayer,
+    /// Down-projection from hidden states into compressed queries.
     pub w_dq: LinearLayer,
+    /// Up-projection from compressed queries to content queries.
     pub w_uq: LinearLayer,
+    /// Projection for rotary key features.
     pub w_kr: LinearLayer,
+    /// Projection for rotary query features.
     pub w_qr: LinearLayer,
+    /// Output projection back to model hidden size.
     pub w_o: LinearLayer,
 }
 
 impl MlaAttention {
+    /// Creates an MLA attention module from model dimensions.
     pub fn new(cfg: &ApexConfig, prefix: &str, device: &Device) -> Result<Self> {
         let m = &cfg.model;
         Ok(Self {
@@ -107,6 +125,7 @@ impl MlaAttention {
         })
     }
 
+    /// Runs MLA attention and returns output states plus an updated cache.
     pub fn forward(
         &self,
         x: &Tensor,
@@ -172,6 +191,7 @@ impl MlaAttention {
         ))
     }
 
+    /// Returns total represented parameters.
     pub fn parameters(&self) -> usize {
         [
             &self.w_dkv,
@@ -188,6 +208,7 @@ impl MlaAttention {
         .sum()
     }
 
+    /// Returns trainable parameters under the current adapter policy.
     pub fn trainable_parameters(&self) -> usize {
         [
             &self.w_dkv,
@@ -204,6 +225,7 @@ impl MlaAttention {
         .sum()
     }
 
+    /// Merges adapter layers into base projections.
     pub fn merge_and_unload(&mut self) -> Result<()> {
         for layer in [
             &mut self.w_dkv,
@@ -220,6 +242,7 @@ impl MlaAttention {
         Ok(())
     }
 
+    /// Appends full MLA tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) -> Result<()> {
         self.w_dkv.named_tensors(&format!("{prefix}.W_DKV"), out)?;
         self.w_uk.named_tensors(&format!("{prefix}.W_UK"), out)?;
@@ -232,6 +255,7 @@ impl MlaAttention {
         Ok(())
     }
 
+    /// Appends only MLA adapter tensors to a named checkpoint list.
     pub fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         self.w_dkv.adapter_tensors(&format!("{prefix}.W_DKV"), out);
         self.w_uk.adapter_tensors(&format!("{prefix}.W_UK"), out);
@@ -244,19 +268,29 @@ impl MlaAttention {
     }
 }
 
+/// Grouped-query attention block used for local sliding-window layers.
 #[derive(Clone)]
 pub struct GqaAttention {
+    /// Number of query heads.
     pub n_heads_q: usize,
+    /// Number of key/value heads.
     pub n_heads_kv: usize,
+    /// Head dimension.
     pub d_head: usize,
+    /// Maximum number of cached tokens kept by local attention.
     pub local_window: usize,
+    /// Query projection.
     pub w_q: LinearLayer,
+    /// Key projection.
     pub w_k: LinearLayer,
+    /// Value projection.
     pub w_v: LinearLayer,
+    /// Output projection.
     pub w_o: LinearLayer,
 }
 
 impl GqaAttention {
+    /// Creates a GQA attention module from model dimensions.
     pub fn new(cfg: &ApexConfig, prefix: &str, device: &Device) -> Result<Self> {
         let m = &cfg.model;
         Ok(Self {
@@ -299,6 +333,7 @@ impl GqaAttention {
         })
     }
 
+    /// Runs sliding-window GQA attention and returns an updated cache.
     pub fn forward(
         &self,
         x: &Tensor,
@@ -356,6 +391,7 @@ impl GqaAttention {
         Ok((self.w_o.forward(&out)?, cache))
     }
 
+    /// Returns total represented parameters.
     pub fn parameters(&self) -> usize {
         [&self.w_q, &self.w_k, &self.w_v, &self.w_o]
             .iter()
@@ -363,6 +399,7 @@ impl GqaAttention {
             .sum()
     }
 
+    /// Returns trainable parameters under the current adapter policy.
     pub fn trainable_parameters(&self) -> usize {
         [&self.w_q, &self.w_k, &self.w_v, &self.w_o]
             .iter()
@@ -370,6 +407,7 @@ impl GqaAttention {
             .sum()
     }
 
+    /// Merges adapter layers into base projections.
     pub fn merge_and_unload(&mut self) -> Result<()> {
         for layer in [&mut self.w_q, &mut self.w_k, &mut self.w_v, &mut self.w_o] {
             layer.merge_and_unload()?;
@@ -377,6 +415,7 @@ impl GqaAttention {
         Ok(())
     }
 
+    /// Appends full GQA tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) -> Result<()> {
         self.w_q.named_tensors(&format!("{prefix}.W_Q"), out)?;
         self.w_k.named_tensors(&format!("{prefix}.W_K"), out)?;
@@ -385,6 +424,7 @@ impl GqaAttention {
         Ok(())
     }
 
+    /// Appends only GQA adapter tensors to a named checkpoint list.
     pub fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         self.w_q.adapter_tensors(&format!("{prefix}.W_Q"), out);
         self.w_k.adapter_tensors(&format!("{prefix}.W_K"), out);
@@ -393,14 +433,18 @@ impl GqaAttention {
     }
 }
 
+/// Attention implementation selected per transformer block.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum AttentionKind {
+    /// Global MLA attention.
     Mla(MlaAttention),
+    /// Local sliding-window GQA attention.
     Gqa(GqaAttention),
 }
 
 impl AttentionKind {
+    /// Dispatches a forward pass to the concrete attention implementation.
     pub(crate) fn forward(
         &self,
         x: &Tensor,
@@ -416,6 +460,7 @@ impl AttentionKind {
         }
     }
 
+    /// Returns represented parameter count.
     pub(crate) fn parameters(&self) -> usize {
         match self {
             Self::Mla(a) => a.parameters(),
@@ -423,6 +468,7 @@ impl AttentionKind {
         }
     }
 
+    /// Returns trainable parameter count.
     pub(crate) fn trainable_parameters(&self) -> usize {
         match self {
             Self::Mla(a) => a.trainable_parameters(),
@@ -430,6 +476,7 @@ impl AttentionKind {
         }
     }
 
+    /// Merges and unloads all adapter layers in the attention module.
     pub(crate) fn merge_and_unload(&mut self) -> Result<()> {
         match self {
             Self::Mla(a) => a.merge_and_unload(),
@@ -437,6 +484,7 @@ impl AttentionKind {
         }
     }
 
+    /// Appends all named attention tensors.
     pub(crate) fn named_tensors(
         &self,
         prefix: &str,
@@ -448,6 +496,7 @@ impl AttentionKind {
         }
     }
 
+    /// Appends adapter tensors from the attention module.
     pub(crate) fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         match self {
             Self::Mla(a) => a.adapter_tensors(prefix, out),
@@ -456,6 +505,7 @@ impl AttentionKind {
     }
 }
 
+/// Extracts `[B,S,D]` dimensions with a readable error label.
 fn dims3(t: &Tensor, label: &str) -> Result<(usize, usize, usize)> {
     let dims = t.dims();
     if dims.len() != 3 {
@@ -466,6 +516,7 @@ fn dims3(t: &Tensor, label: &str) -> Result<(usize, usize, usize)> {
     Ok((dims[0], dims[1], dims[2]))
 }
 
+/// Computes scaled dot-product attention with an optional additive mask.
 fn scaled_attention(
     q: &Tensor,
     k: &Tensor,

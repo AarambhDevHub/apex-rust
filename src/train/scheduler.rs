@@ -1,3 +1,6 @@
+//! Learning-rate schedules used by training commands.
+
+/// Cosine-decay schedule with linear warmup and a minimum learning-rate ratio.
 pub fn get_lr(
     step: usize,
     warmup_steps: usize,

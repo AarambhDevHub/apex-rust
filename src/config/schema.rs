@@ -5,22 +5,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ApexError, Result};
 
+/// Transformer dimensions and sequence-level model settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// Hidden size used by token embeddings and transformer blocks.
     pub d_model: usize,
+    /// Number of transformer blocks.
     pub n_layers: usize,
+    /// Number of query heads.
     pub n_heads_q: usize,
+    /// Number of key/value heads used by grouped-query attention.
     pub n_heads_kv: usize,
+    /// Content head dimension.
     pub d_head: usize,
+    /// Compressed key/value latent width used by MLA blocks.
     pub d_kv_compressed: usize,
+    /// Compressed query latent width used by MLA blocks.
     pub d_q_compressed: usize,
+    /// RoPE-only head dimension used by MLA blocks.
     pub d_head_rope: usize,
+    /// Feed-forward hidden width.
     pub d_ffn: usize,
+    /// Token vocabulary size.
     pub vocab_size: usize,
+    /// Maximum context length supported by RoPE caches.
     pub max_seq_len: usize,
+    /// Base frequency for rotary position embeddings.
     pub rope_base: f64,
+    /// YaRN/RoPE scaling factor for long-context variants.
     pub rope_scaling: f64,
+    /// Dropout probability kept in the schema for training compatibility.
     pub dropout: f64,
 }
 
@@ -45,11 +60,15 @@ impl Default for ModelConfig {
     }
 }
 
+/// Attention routing settings for alternating global MLA and local GQA blocks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AttentionConfig {
+    /// Every Nth block is a global MLA block.
     pub global_layer_freq: usize,
+    /// Sliding-window size used by local GQA blocks.
     pub local_window: usize,
+    /// Whether optimized attention kernels are requested when available.
     pub flash: bool,
 }
 
@@ -63,14 +82,21 @@ impl Default for AttentionConfig {
     }
 }
 
+/// Mixture-of-experts feed-forward configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MoeConfig {
+    /// Enables routed expert layers.
     pub enabled: bool,
+    /// Number of routed experts per MoE layer.
     pub n_experts: usize,
+    /// Number of routed experts selected per token.
     pub n_active: usize,
+    /// Number of shared experts always applied.
     pub n_shared: usize,
+    /// Frequency that controls which blocks use dense FFN versus MoE FFN.
     pub moe_layer_freq: usize,
+    /// Expert-bias update strength for load balancing.
     pub balancer_alpha: f64,
 }
 
@@ -87,11 +113,15 @@ impl Default for MoeConfig {
     }
 }
 
+/// Token-level gate that can skip feed-forward computation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SkipGateConfig {
+    /// Enables the skip gate inside transformer blocks.
     pub enabled: bool,
+    /// Hidden width of the two-layer gate MLP.
     pub hidden_dim: usize,
+    /// Gate probability threshold below which the FFN contribution is dropped.
     pub threshold: f64,
 }
 
@@ -105,11 +135,15 @@ impl Default for SkipGateConfig {
     }
 }
 
+/// Auxiliary heads for predicting multiple future tokens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MultiTokenHeadConfig {
+    /// Enables speculative auxiliary heads.
     pub enabled: bool,
+    /// Number of future-token heads attached to the final hidden state.
     pub n_predict: usize,
+    /// Weight applied to speculative losses during pretraining.
     pub lambda_spec: f64,
 }
 
@@ -123,10 +157,13 @@ impl Default for MultiTokenHeadConfig {
     }
 }
 
+/// Settings for optional thinking-token generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ThinkingConfig {
+    /// Allows generation to enter a thinking-token phase.
     pub enabled: bool,
+    /// Maximum number of tokens allowed inside the thinking phase.
     pub max_thinking_tokens: usize,
 }
 
@@ -139,25 +176,43 @@ impl Default for ThinkingConfig {
     }
 }
 
+/// Vision encoder and projector settings for multimodal runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VisionConfig {
+    /// Enables the image pathway and visual-token insertion.
     pub enabled: bool,
+    /// Square input image size expected by the native ViT encoder.
     pub image_size: usize,
+    /// Square patch size used to flatten image patches.
     pub patch_size: usize,
+    /// Number of image channels.
     pub in_channels: usize,
+    /// Vision encoder implementation name.
     pub encoder_type: String,
+    /// Vision token hidden size before projection into text space.
     pub d_vision: usize,
+    /// Number of vision encoder layers reserved by the config.
     pub n_layers: usize,
+    /// Number of vision attention heads reserved by the config.
     pub n_heads: usize,
+    /// Vision MLP expansion ratio reserved by the config.
     pub mlp_ratio: f64,
+    /// Vision dropout probability kept for compatibility.
     pub dropout: f64,
+    /// Projector implementation, currently `perceiver` or `mlp`.
     pub projector_type: String,
+    /// Number of projected visual tokens inserted for each image token.
     pub n_visual_tokens: usize,
+    /// Hidden width of the text projector.
     pub projector_hidden_dim: usize,
+    /// Number of projector MLP layers.
     pub projector_layers: usize,
+    /// Token ID that is replaced by projected visual embeddings.
     pub image_token_id: u32,
+    /// Marks the vision encoder as frozen for training policies.
     pub freeze_vision_encoder: bool,
+    /// Marks the language model as frozen for vision-only tuning policies.
     pub freeze_language_model: bool,
 }
 
@@ -185,13 +240,18 @@ impl Default for VisionConfig {
     }
 }
 
+/// Supported parameter-efficient fine-tuning methods.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PeftMethod {
+    /// Low-rank adapters over selected linear layers.
     #[default]
     Lora,
+    /// LoRA adapters with a 4-bit quantized base linear layer.
     Qlora,
+    /// Weight-decomposed LoRA with trainable row magnitudes.
     Dora,
+    /// DoRA adapters with a 4-bit quantized base linear layer.
     Qdora,
 }
 
@@ -207,21 +267,35 @@ impl std::fmt::Display for PeftMethod {
     }
 }
 
+/// Parameter-efficient fine-tuning configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PeftConfig {
+    /// Enables adapter insertion during model construction.
     pub enabled: bool,
+    /// PEFT method used for matching target modules.
     pub method: PeftMethod,
+    /// Adapter rank.
     pub r: usize,
+    /// Adapter scaling numerator.
     pub alpha: usize,
+    /// Adapter dropout probability kept for compatibility.
     pub dropout: f64,
+    /// Freezes non-adapter base weights when enabled.
     pub freeze_base_model: bool,
+    /// Quantization bit width for QLoRA/QDoRA.
     pub quantization_bits: usize,
+    /// Four-bit codebook type, usually `nf4` or `fp4`.
     pub quant_type: String,
+    /// Quantizes per-row scales when using QLoRA/QDoRA.
     pub double_quant: bool,
+    /// Compute dtype label used by configuration and reports.
     pub compute_dtype: String,
+    /// Linear module name fragments that receive adapters.
     pub target_modules: Vec<String>,
+    /// Extra modules that should be saved with adapters.
     pub modules_to_save: Vec<String>,
+    /// Bias handling policy: `none`, `all`, or `lora_only`.
     pub bias: String,
 }
 
@@ -251,16 +325,25 @@ impl Default for PeftConfig {
     }
 }
 
+/// Adapter-DPO alignment settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AdapterDpoConfig {
+    /// Enables adapter-DPO training mode.
     pub enabled: bool,
+    /// DPO reward temperature.
     pub beta: f64,
+    /// Probability mass assigned to the negative DPO label.
     pub label_smoothing: f64,
+    /// Uses zero reference scores instead of a reference model.
     pub reference_free: bool,
+    /// Normalizes sequence log-probability by response length.
     pub length_normalize: bool,
+    /// Maximum prompt tokens used by preference loaders.
     pub max_prompt_len: usize,
+    /// Maximum response tokens used by preference loaders.
     pub max_response_len: usize,
+    /// Optional checkpoint cadence for adapter-DPO loops.
     pub save_every_steps: usize,
 }
 
@@ -279,22 +362,37 @@ impl Default for AdapterDpoConfig {
     }
 }
 
+/// Common single-process training hyperparameters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TrainingConfig {
+    /// Number of examples per optimization step.
     pub batch_size: usize,
+    /// Training sequence length before optional visual-token expansion.
     pub seq_len: usize,
+    /// Peak learning rate after warmup.
     pub peak_lr: f64,
+    /// Fraction of peak LR used as the cosine floor.
     pub min_lr_ratio: f64,
+    /// Number of warmup steps.
     pub warmup_steps: usize,
+    /// Total scheduled optimization steps.
     pub max_steps: usize,
+    /// Gradient clipping threshold.
     pub grad_clip: f64,
+    /// AdamW weight decay coefficient.
     pub weight_decay: f64,
+    /// Optimizer name for CLI/config compatibility.
     pub optimizer: String,
+    /// Adam beta1 value.
     pub beta1: f64,
+    /// Adam beta2 value.
     pub beta2: f64,
+    /// Adam epsilon value.
     pub eps: f64,
+    /// Number of batches accumulated per update.
     pub gradient_accumulation_steps: usize,
+    /// Mixed-precision mode label.
     pub mixed_precision: String,
 }
 
@@ -319,14 +417,20 @@ impl Default for TrainingConfig {
     }
 }
 
+/// Group relative policy optimization settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GrpoConfig {
+    /// Number of generated samples per prompt.
     #[serde(rename = "G")]
     pub g: usize,
+    /// KL penalty coefficient.
     pub beta: f64,
+    /// Process reward model loss weight.
     pub lambda_prm: f64,
+    /// Constitutional AI loss weight.
     pub lambda_cai: f64,
+    /// PPO-style clipping range.
     pub clip_eps: f64,
 }
 
@@ -342,23 +446,36 @@ impl Default for GrpoConfig {
     }
 }
 
+/// Complete APEX runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ApexConfig {
+    /// Transformer dimensions and vocabulary settings.
     pub model: ModelConfig,
+    /// Attention pattern and local-window settings.
     pub attention: AttentionConfig,
+    /// Mixture-of-experts settings.
     pub moe: MoeConfig,
+    /// Feed-forward skip-gate settings.
     pub skip_gate: SkipGateConfig,
+    /// Speculative multi-token-head settings.
     pub multi_token_head: MultiTokenHeadConfig,
+    /// Thinking-token generation settings.
     pub thinking: ThinkingConfig,
+    /// Multimodal vision settings.
     pub vision: VisionConfig,
+    /// Adapter/PEFT settings.
     pub peft: PeftConfig,
+    /// Training hyperparameters.
     pub training: TrainingConfig,
+    /// GRPO hyperparameters.
     pub grpo: GrpoConfig,
+    /// Adapter-DPO hyperparameters.
     pub adapter_dpo: AdapterDpoConfig,
 }
 
 impl ApexConfig {
+    /// Loads a YAML config file and validates cross-field constraints.
     pub fn from_yaml(path: impl AsRef<Path>) -> Result<Self> {
         let text = fs::read_to_string(path)?;
         let cfg: Self = serde_yaml::from_str(&text)?;
@@ -366,6 +483,7 @@ impl ApexConfig {
         Ok(cfg)
     }
 
+    /// Serializes the config as YAML, creating parent directories if needed.
     pub fn to_yaml(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -375,6 +493,7 @@ impl ApexConfig {
         Ok(())
     }
 
+    /// Validates dimensions, feature dependencies, and supported option values.
     pub fn validate(&self) -> Result<()> {
         let m = &self.model;
         if m.n_heads_kv == 0 || !m.n_heads_q.is_multiple_of(m.n_heads_kv) {

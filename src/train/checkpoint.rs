@@ -10,17 +10,26 @@ use crate::config::ApexConfig;
 use crate::error::{ApexError, Result};
 use crate::model::ApexModel;
 
+/// JSON sidecar metadata for a saved checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointMetadata {
+    /// Metadata format marker.
     pub format: String,
+    /// Crate version that wrote the checkpoint.
     pub version: String,
+    /// Training step at save time.
     pub step: usize,
+    /// Epoch number at save time.
     pub epoch: usize,
+    /// Last reported loss value.
     pub loss: f64,
+    /// Optional full training/model config.
     pub config: Option<ApexConfig>,
+    /// Human-readable note about the payload files.
     pub note: String,
 }
 
+/// Writes checkpoint metadata as pretty JSON.
 pub fn save_checkpoint_metadata(
     path: impl AsRef<Path>,
     step: usize,
@@ -45,6 +54,7 @@ pub fn save_checkpoint_metadata(
     Ok(path.to_path_buf())
 }
 
+/// Owned safetensors view backed by little-endian f32 bytes.
 #[derive(Clone)]
 struct OwnedSafeTensor {
     dtype: Dtype,
@@ -70,10 +80,12 @@ impl View for OwnedSafeTensor {
     }
 }
 
+/// Saves all model tensors into a safetensors file.
 pub fn save_model_safetensors(path: impl AsRef<Path>, model: &ApexModel) -> Result<PathBuf> {
     save_named_tensors(path, model.named_tensors()?, "full_model")
 }
 
+/// Saves only adapter tensors into a safetensors file.
 pub fn save_adapter_safetensors(path: impl AsRef<Path>, model: &ApexModel) -> Result<PathBuf> {
     save_named_tensors(path, model.adapter_tensors(), "adapter")
 }

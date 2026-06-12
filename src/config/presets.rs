@@ -1,5 +1,6 @@
 use super::schema::*;
 
+/// Builds the smallest complete configuration used by tests and examples.
 pub fn get_tiny_config() -> ApexConfig {
     ApexConfig {
         model: ModelConfig {
@@ -62,6 +63,7 @@ pub fn get_tiny_config() -> ApexConfig {
     }
 }
 
+/// Builds a tiny LoRA configuration for adapter smoke tests.
 pub fn get_tiny_lora_config() -> ApexConfig {
     let mut cfg = get_tiny_config();
     cfg.peft.enabled = true;
@@ -74,24 +76,28 @@ pub fn get_tiny_lora_config() -> ApexConfig {
     cfg
 }
 
+/// Builds a tiny QLoRA configuration with 4-bit base layers.
 pub fn get_tiny_qlora_config() -> ApexConfig {
     let mut cfg = get_tiny_lora_config();
     cfg.peft.method = PeftMethod::Qlora;
     cfg
 }
 
+/// Builds a tiny DoRA configuration with trainable row magnitudes.
 pub fn get_tiny_dora_config() -> ApexConfig {
     let mut cfg = get_tiny_lora_config();
     cfg.peft.method = PeftMethod::Dora;
     cfg
 }
 
+/// Builds a tiny QDoRA configuration with quantized DoRA base layers.
 pub fn get_tiny_qdora_config() -> ApexConfig {
     let mut cfg = get_tiny_lora_config();
     cfg.peft.method = PeftMethod::Qdora;
     cfg
 }
 
+/// Builds a tiny adapter-DPO configuration for the selected PEFT method.
 pub fn get_tiny_adapter_dpo_config(method: PeftMethod) -> ApexConfig {
     let mut cfg = match method {
         PeftMethod::Lora => get_tiny_lora_config(),
@@ -106,16 +112,19 @@ pub fn get_tiny_adapter_dpo_config(method: PeftMethod) -> ApexConfig {
     cfg
 }
 
+/// Builds a tiny vision-enabled configuration for multimodal tests.
 pub fn get_tiny_vision_config() -> ApexConfig {
     let mut cfg = get_tiny_config();
     cfg.vision.enabled = true;
     cfg
 }
 
+/// Returns true when a layer index should use global MLA attention.
 pub fn is_global_layer(layer_idx: usize, global_layer_freq: usize) -> bool {
     layer_idx % global_layer_freq == global_layer_freq - 1
 }
 
+/// Returns true when a layer index should use the MoE feed-forward path.
 pub fn is_moe_layer(layer_idx: usize, moe: &MoeConfig) -> bool {
     moe.enabled && moe.moe_layer_freq != 0 && !layer_idx.is_multiple_of(moe.moe_layer_freq)
 }

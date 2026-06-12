@@ -2,6 +2,7 @@ use candle_core::{Device, Tensor};
 
 use crate::error::{ApexError, Result};
 
+/// Precomputes rotary cosine/sine caches and returns the YaRN attention factor.
 pub fn precompute_rope_cache(
     d_head: usize,
     max_seq_len: usize,
@@ -34,6 +35,7 @@ pub fn precompute_rope_cache(
     ))
 }
 
+/// Applies YaRN frequency scaling to a RoPE frequency vector.
 pub fn apply_yarn_scaling_vec(
     theta: &[f32],
     scale_factor: f64,
@@ -59,6 +61,7 @@ pub fn apply_yarn_scaling_vec(
     (out, 0.1 * scale_factor.ln() + 1.0)
 }
 
+/// Rotates alternating feature pairs for RoPE.
 fn rotate_half_vec(v: &[f32]) -> Vec<f32> {
     let mut out = Vec::with_capacity(v.len());
     for pair in v.chunks(2) {
@@ -70,6 +73,7 @@ fn rotate_half_vec(v: &[f32]) -> Vec<f32> {
     out
 }
 
+/// Applies rotary embeddings to a single `[B,H,S,D]` tensor.
 pub(crate) fn apply_rope_single(
     x: &Tensor,
     cos: &Tensor,
@@ -102,6 +106,7 @@ pub(crate) fn apply_rope_single(
     Ok(Tensor::from_vec(out, (b, h, s, d), x.device())?)
 }
 
+/// Applies rotary embeddings to query and key tensors.
 pub(crate) fn apply_rope_pair(
     q: &Tensor,
     k: &Tensor,

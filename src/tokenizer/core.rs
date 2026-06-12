@@ -7,17 +7,25 @@ use crate::error::{ApexError, Result};
 
 use super::constants::{special, SPECIAL_TOKENS};
 
+/// One chat message used by the chat-template formatter.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
+    /// Message role such as `system`, `user`, or `assistant`.
     pub role: String,
+    /// Message text content.
     pub content: String,
 }
 
+/// Tokenizer wrapper with optional `tokenizers` JSON backend and a simple fallback.
 #[derive(Clone)]
 pub struct ApexTokenizer {
+    /// Loaded Hugging Face/tokenizers backend, if a valid JSON path was provided.
     tokenizer: Option<Tokenizer>,
+    /// Mapping from symbolic special-token names to token IDs.
     special_ids: HashMap<String, u32>,
+    /// Minimal fallback token-to-ID table.
     simple_vocab: HashMap<String, u32>,
+    /// Minimal fallback ID-to-token table.
     simple_rev: HashMap<u32, String>,
 }
 
@@ -31,6 +39,7 @@ impl std::fmt::Debug for ApexTokenizer {
 }
 
 impl ApexTokenizer {
+    /// Loads a tokenizer JSON file or builds the built-in fallback tokenizer.
     pub fn new(path: Option<impl AsRef<Path>>) -> Result<Self> {
         let tokenizer = if let Some(path) = path {
             let path = path.as_ref();
@@ -93,6 +102,7 @@ impl ApexTokenizer {
         })
     }
 
+    /// Returns the tokenizer vocabulary size.
     pub fn vocab_size(&self) -> usize {
         self.tokenizer
             .as_ref()
@@ -100,38 +110,49 @@ impl ApexTokenizer {
             .unwrap_or_else(|| self.simple_vocab.len())
     }
 
+    /// Returns the padding token ID.
     pub fn pad_token_id(&self) -> u32 {
         self.id("pad", 0)
     }
+    /// Returns the beginning-of-text token ID.
     pub fn bos_token_id(&self) -> u32 {
         self.id("bos", 1)
     }
+    /// Returns the end-of-text token ID.
     pub fn eos_token_id(&self) -> u32 {
         self.id("eos", 2)
     }
+    /// Returns the system-role token ID.
     pub fn system_token_id(&self) -> u32 {
         self.id("system", 3)
     }
+    /// Returns the user-role token ID.
     pub fn user_token_id(&self) -> u32 {
         self.id("user", 4)
     }
+    /// Returns the assistant-role token ID.
     pub fn assistant_token_id(&self) -> u32 {
         self.id("assistant", 5)
     }
+    /// Returns the thinking-start token ID.
     pub fn thinking_start_id(&self) -> u32 {
         self.id("thinking_start", 6)
     }
+    /// Returns the thinking-end token ID.
     pub fn thinking_end_id(&self) -> u32 {
         self.id("thinking_end", 7)
     }
+    /// Returns the image placeholder token ID.
     pub fn img_token_id(&self) -> u32 {
         self.id("img", 8)
     }
 
+    /// Resolves a special token ID by name with a fallback value.
     fn id(&self, name: &str, fallback: u32) -> u32 {
         *self.special_ids.get(name).unwrap_or(&fallback)
     }
 
+    /// Encodes text into token IDs, optionally adding BOS/EOS.
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         let mut ids = if let Some(tok) = self.tokenizer.as_ref() {
             tok.encode(text, false)
@@ -148,6 +169,7 @@ impl ApexTokenizer {
         Ok(ids)
     }
 
+    /// Decodes token IDs into text.
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         if let Some(tok) = self.tokenizer.as_ref() {
             return tok
@@ -171,6 +193,7 @@ impl ApexTokenizer {
         Ok(out)
     }
 
+    /// Formats chat messages using APEX special role tokens.
     pub fn format_chat(
         &self,
         messages: &[ChatMessage],
@@ -207,6 +230,7 @@ impl ApexTokenizer {
         parts.concat()
     }
 
+    /// Formats then encodes chat messages.
     pub fn encode_chat(
         &self,
         messages: &[ChatMessage],
@@ -217,6 +241,7 @@ impl ApexTokenizer {
         self.encode(&text, false)
     }
 
+    /// Computes role token types for SFT masking.
     pub fn get_token_types(&self, token_ids: &[u32]) -> Vec<u8> {
         let mut current = 0u8;
         let mut out = Vec::with_capacity(token_ids.len());
@@ -236,6 +261,7 @@ impl ApexTokenizer {
         out
     }
 
+    /// Encodes text with the built-in byte-like fallback tokenizer.
     fn simple_encode(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
         let mut remaining = text;

@@ -95,6 +95,19 @@ while prompt tokens are ignored in assistant-only loss.
 `ApexConfig` is the top-level runtime configuration. It is serde-backed and can
 be loaded from YAML.
 
+Preset YAML files live in `configs/`:
+
+| File | Role |
+|---|---|
+| `tiny.yaml` | Minimal CPU-friendly text model |
+| `small.yaml` | Small text model |
+| `medium.yaml` | Medium text model |
+| `large.yaml` | Large text model |
+| `tiny_vision.yaml` | Minimal CPU-friendly vision-language model |
+| `small_vision.yaml` | Small vision-language model |
+| `medium_vision.yaml` | Medium vision-language model |
+| `large_vision.yaml` | Large vision-language model |
+
 Major sections:
 
 | Section | Responsibility |

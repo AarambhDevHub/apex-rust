@@ -1,3 +1,5 @@
+//! Vision encoder, projector, preprocessing, and multimodal model wrapper.
+
 mod encoder;
 mod preprocess;
 mod projector;

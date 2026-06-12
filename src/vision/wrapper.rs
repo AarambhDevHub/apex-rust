@@ -8,15 +8,21 @@ use crate::tensor;
 use super::encoder::NativeVisionEncoder;
 use super::projector::VisionToTextProjector;
 
+/// Multimodal wrapper that inserts projected vision tokens into the language model.
 #[derive(Clone)]
 pub struct ApexVisionModel {
+    /// Underlying text language model.
     pub language_model: ApexModel,
+    /// Native image patch encoder.
     pub encoder: NativeVisionEncoder,
+    /// Vision-to-text projector.
     pub projector: VisionToTextProjector,
+    /// Token ID that is replaced by visual token embeddings.
     pub image_token_id: u32,
 }
 
 impl ApexVisionModel {
+    /// Creates a vision-enabled model wrapper.
     pub fn new(config: ApexConfig, device: Device) -> Result<Self> {
         if !config.vision.enabled {
             return Err(ApexError::Config(
@@ -31,10 +37,12 @@ impl ApexVisionModel {
         })
     }
 
+    /// Encodes an image into projected text-space visual embeddings.
     pub fn encode_image(&self, image: &Tensor) -> Result<Tensor> {
         self.projector.forward(&self.encoder.forward(image)?)
     }
 
+    /// Runs text-only or image-conditioned forward pass.
     pub fn forward(
         &mut self,
         token_ids: &[Vec<u32>],
@@ -58,6 +66,7 @@ impl ApexVisionModel {
         }
     }
 
+    /// Runs a forward pass after inserting already-computed visual embeddings.
     pub fn forward_with_visual_embeddings(
         &mut self,
         token_ids: &[Vec<u32>],
@@ -70,6 +79,7 @@ impl ApexVisionModel {
             .forward_embeddings(&embeddings, None, prefix_len, None, return_hidden)
     }
 
+    /// Replaces each image token with the projected visual embedding sequence.
     pub fn splice_visual_embeddings(
         &self,
         token_ids: &[Vec<u32>],
@@ -128,6 +138,7 @@ impl ApexVisionModel {
             .map_err(Into::into)
     }
 
+    /// Returns total parameters across text model, encoder, and projector.
     pub fn total_parameters(&self) -> usize {
         self.language_model.total_parameters()
             + self.encoder.parameters()
@@ -135,6 +146,7 @@ impl ApexVisionModel {
     }
 }
 
+/// Expands one label row to ignore labels for inserted visual tokens.
 pub fn expand_labels_for_visual_tokens(
     labels: &[i64],
     input_ids: &[u32],
@@ -153,6 +165,7 @@ pub fn expand_labels_for_visual_tokens(
     out
 }
 
+/// Embeds token IDs using the text model's embedding table.
 fn embed_tokens_from_model(embedding: &Tensor, token_ids: &[Vec<u32>]) -> Result<Tensor> {
     let rows = embedding.to_vec2::<f32>()?;
     let b = token_ids.len();

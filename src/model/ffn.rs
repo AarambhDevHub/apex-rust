@@ -6,14 +6,19 @@ use crate::tensor;
 
 use super::linear::LinearLayer;
 
+/// Dense SwiGLU feed-forward network.
 #[derive(Clone)]
 pub struct DenseFfn {
+    /// Gate projection used before SiLU.
     pub w_gate: LinearLayer,
+    /// Up projection multiplied by the gated branch.
     pub w_up: LinearLayer,
+    /// Down projection back to model hidden size.
     pub w_down: LinearLayer,
 }
 
 impl DenseFfn {
+    /// Creates a dense feed-forward network.
     pub fn new(cfg: &ApexConfig, prefix: &str, device: &Device) -> Result<Self> {
         let m = &cfg.model;
         Ok(Self {
@@ -44,28 +49,33 @@ impl DenseFfn {
         })
     }
 
+    /// Applies SwiGLU feed-forward computation.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let gate = tensor::silu(&self.w_gate.forward(x)?)?;
         let up = self.w_up.forward(x)?;
         self.w_down.forward(&gate.broadcast_mul(&up)?)
     }
 
+    /// Returns total represented parameters.
     pub fn parameters(&self) -> usize {
         self.w_gate.parameters() + self.w_up.parameters() + self.w_down.parameters()
     }
 
+    /// Returns trainable parameters under the current adapter policy.
     pub fn trainable_parameters(&self) -> usize {
         self.w_gate.trainable_parameters()
             + self.w_up.trainable_parameters()
             + self.w_down.trainable_parameters()
     }
 
+    /// Merges adapter layers into the base projections.
     pub fn merge_and_unload(&mut self) -> Result<()> {
         self.w_gate.merge_and_unload()?;
         self.w_up.merge_and_unload()?;
         self.w_down.merge_and_unload()
     }
 
+    /// Appends full FFN tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) -> Result<()> {
         self.w_gate
             .named_tensors(&format!("{prefix}.W_gate"), out)?;
@@ -75,6 +85,7 @@ impl DenseFfn {
         Ok(())
     }
 
+    /// Appends only FFN adapter tensors to a named checkpoint list.
     pub fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         self.w_gate
             .adapter_tensors(&format!("{prefix}.W_gate"), out);
@@ -84,18 +95,27 @@ impl DenseFfn {
     }
 }
 
+/// Mixture-of-experts feed-forward network with shared and routed experts.
 #[derive(Clone)]
 pub struct MoeFfn {
+    /// Number of routed experts.
     pub n_experts: usize,
+    /// Number of routed experts selected per token.
     pub n_active: usize,
+    /// Shared experts applied to every token.
     pub shared_experts: Vec<DenseFfn>,
+    /// Routed experts selected by the router.
     pub routed_experts: Vec<DenseFfn>,
+    /// Router projection from hidden states to expert logits.
     pub router: LinearLayer,
+    /// Additive per-expert bias used by load balancing.
     pub expert_bias: Vec<f32>,
+    /// Last selected top-k expert indices per flattened token.
     pub last_top_k_idx: Vec<Vec<usize>>,
 }
 
 impl MoeFfn {
+    /// Creates a MoE feed-forward layer from config.
     pub fn new(cfg: &ApexConfig, prefix: &str, device: &Device) -> Result<Self> {
         let shared_experts = (0..cfg.moe.n_shared)
             .map(|i| DenseFfn::new(cfg, &format!("{prefix}.shared.{i}"), device))
@@ -121,6 +141,7 @@ impl MoeFfn {
         })
     }
 
+    /// Applies shared experts and a weighted combination of routed experts.
     pub fn forward(&mut self, x: &Tensor) -> Result<Tensor> {
         let dims = x.dims();
         if dims.len() != 3 {
@@ -164,11 +185,13 @@ impl MoeFfn {
         Ok(out)
     }
 
+    /// Replaces the additive expert-bias vector.
     pub fn set_expert_bias(&mut self, bias: &[f32]) {
         self.expert_bias.clear();
         self.expert_bias.extend_from_slice(bias);
     }
 
+    /// Returns total represented parameters across experts and router.
     pub fn parameters(&self) -> usize {
         self.shared_experts
             .iter()
@@ -182,6 +205,7 @@ impl MoeFfn {
             + self.router.parameters()
     }
 
+    /// Returns trainable parameters under the current adapter policy.
     pub fn trainable_parameters(&self) -> usize {
         self.shared_experts
             .iter()
@@ -195,6 +219,7 @@ impl MoeFfn {
             + self.router.trainable_parameters()
     }
 
+    /// Merges adapter layers inside all experts and router.
     pub fn merge_and_unload(&mut self) -> Result<()> {
         for e in &mut self.shared_experts {
             e.merge_and_unload()?;
@@ -205,6 +230,7 @@ impl MoeFfn {
         self.router.merge_and_unload()
     }
 
+    /// Appends full MoE tensors to a named checkpoint list.
     pub fn named_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) -> Result<()> {
         for (idx, expert) in self.shared_experts.iter().enumerate() {
             expert.named_tensors(&format!("{prefix}.shared.{idx}"), out)?;
@@ -217,6 +243,7 @@ impl MoeFfn {
         Ok(())
     }
 
+    /// Appends only MoE adapter tensors to a named checkpoint list.
     pub fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         for (idx, expert) in self.shared_experts.iter().enumerate() {
             expert.adapter_tensors(&format!("{prefix}.shared.{idx}"), out);
@@ -229,14 +256,18 @@ impl MoeFfn {
     }
 }
 
+/// Feed-forward implementation selected per transformer block.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum FfnKind {
+    /// Dense SwiGLU FFN.
     Dense(DenseFfn),
+    /// Mixture-of-experts FFN.
     Moe(MoeFfn),
 }
 
 impl FfnKind {
+    /// Dispatches a forward pass to the selected FFN implementation.
     pub(crate) fn forward(&mut self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::Dense(f) => f.forward(x),
@@ -244,6 +275,7 @@ impl FfnKind {
         }
     }
 
+    /// Returns represented parameter count.
     pub(crate) fn parameters(&self) -> usize {
         match self {
             Self::Dense(f) => f.parameters(),
@@ -251,6 +283,7 @@ impl FfnKind {
         }
     }
 
+    /// Returns trainable parameter count.
     pub(crate) fn trainable_parameters(&self) -> usize {
         match self {
             Self::Dense(f) => f.trainable_parameters(),
@@ -258,6 +291,7 @@ impl FfnKind {
         }
     }
 
+    /// Merges and unloads all adapter layers in the FFN.
     pub(crate) fn merge_and_unload(&mut self) -> Result<()> {
         match self {
             Self::Dense(f) => f.merge_and_unload(),
@@ -265,6 +299,7 @@ impl FfnKind {
         }
     }
 
+    /// Appends full FFN tensors.
     pub(crate) fn named_tensors(
         &self,
         prefix: &str,
@@ -276,6 +311,7 @@ impl FfnKind {
         }
     }
 
+    /// Appends adapter tensors from the FFN.
     pub(crate) fn adapter_tensors(&self, prefix: &str, out: &mut Vec<(String, Tensor)>) {
         match self {
             Self::Dense(f) => f.adapter_tensors(prefix, out),

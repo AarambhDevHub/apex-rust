@@ -1,3 +1,5 @@
+//! Alignment utilities for adapter-DPO and GRPO-style policy losses.
+
 use serde::{Deserialize, Serialize};
 
 use crate::data::PreferenceSample;
@@ -5,15 +7,22 @@ use crate::error::{ApexError, Result};
 use crate::model::ApexModel;
 use crate::tensor;
 
+/// Scalar metrics returned by one DPO comparison.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct DpoMetrics {
+    /// Final smoothed DPO loss.
     pub loss: f64,
+    /// Policy log-probability of the chosen response sequence.
     pub chosen_logprob: f64,
+    /// Policy log-probability of the rejected response sequence.
     pub rejected_logprob: f64,
+    /// Difference between chosen and rejected rewards.
     pub reward_margin: f64,
+    /// One when the chosen reward is larger than the rejected reward.
     pub accuracy: f64,
 }
 
+/// Computes response log-probability for a tokenized prompt+response sequence.
 pub fn sequence_logprob(
     model: &mut ApexModel,
     token_ids: &[u32],
@@ -47,6 +56,7 @@ pub fn sequence_logprob(
     }
 }
 
+/// Computes the DPO loss and metrics from policy and reference log-probabilities.
 pub fn dpo_loss(
     policy_chosen: f64,
     policy_rejected: f64,
@@ -74,6 +84,7 @@ pub fn dpo_loss(
     }
 }
 
+/// Runs a single adapter-DPO scoring step for one preference sample.
 pub fn adapter_dpo_step(
     policy: &mut ApexModel,
     reference: Option<&mut ApexModel>,
@@ -129,6 +140,7 @@ pub fn adapter_dpo_step(
     ))
 }
 
+/// Normalizes reward values into zero-mean, unit-variance GRPO advantages.
 pub fn grpo_advantages(rewards: &[f64]) -> Vec<f64> {
     if rewards.is_empty() {
         return Vec::new();
@@ -139,6 +151,7 @@ pub fn grpo_advantages(rewards: &[f64]) -> Vec<f64> {
     rewards.iter().map(|r| (r - mean) / std).collect()
 }
 
+/// Computes PPO-style clipped policy loss from old/new log-probs and advantages.
 pub fn clipped_policy_loss(
     old_logprobs: &[f64],
     new_logprobs: &[f64],

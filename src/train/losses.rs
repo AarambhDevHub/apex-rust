@@ -3,14 +3,20 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ApexError, Result};
 use crate::tensor;
 
+/// Scalar loss values returned by training loss helpers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LossMetrics {
+    /// Total objective including optional auxiliary terms.
     pub loss_total: f64,
+    /// Main next-token cross-entropy loss.
     pub loss_main: f64,
+    /// Average speculative-head loss.
     pub loss_spec_avg: f64,
+    /// Number of non-ignored target tokens.
     pub valid_tokens: usize,
 }
 
+/// Computes next-token pretraining loss plus optional speculative-head loss.
 pub fn compute_pretrain_loss(
     logits: &candle_core::Tensor,
     spec_logits: Option<&[candle_core::Tensor]>,
@@ -49,6 +55,7 @@ pub fn compute_pretrain_loss(
     })
 }
 
+/// Computes supervised fine-tuning loss over assistant tokens only.
 pub fn compute_sft_loss(
     logits: &candle_core::Tensor,
     token_ids: &[Vec<u32>],
@@ -65,6 +72,7 @@ pub fn compute_sft_loss(
     })
 }
 
+/// Computes multimodal SFT loss from already-expanded label rows.
 pub fn compute_vision_sft_loss(
     logits: &candle_core::Tensor,
     labels: &[Vec<i64>],
@@ -92,6 +100,7 @@ pub fn compute_vision_sft_loss(
     })
 }
 
+/// Expands labels to match inserted visual tokens, marking visual labels ignored.
 pub fn expand_labels_for_visual_tokens(
     token_ids: &[Vec<u32>],
     labels: &[Vec<i64>],

@@ -13,31 +13,50 @@ use super::norm::RmsNorm;
 use super::rope::precompute_rope_cache;
 use super::skip_gate::SkipGate;
 
+/// Output bundle from an APEX model forward pass.
 #[derive(Clone)]
 pub struct ModelOutput {
+    /// Main tied-LM-head logits with shape `[B,S,V]`.
     pub logits: Tensor,
+    /// Optional auxiliary future-token logits.
     pub spec_logits: Option<Vec<Tensor>>,
+    /// Updated per-layer KV caches.
     pub kv_caches: Vec<KvCache>,
+    /// Final hidden states when requested.
     pub hidden_states: Option<Tensor>,
 }
 
+/// Candle implementation of the APEX transformer language model.
 #[derive(Clone)]
 pub struct ApexModel {
+    /// Full runtime configuration.
     pub config: ApexConfig,
+    /// Device holding all tensors.
     pub device: Device,
+    /// Tied token embedding and LM-head matrix.
     pub embedding: Tensor,
+    /// Scale applied to token embeddings before transformer blocks.
     pub embed_scale: f64,
+    /// Transformer block stack.
     pub blocks: Vec<TransformerBlock>,
+    /// Final RMSNorm before the tied LM head.
     pub final_norm: RmsNorm,
+    /// Optional speculative multi-token heads.
     pub multi_token_head: Option<MultiTokenHead>,
+    /// Content-head RoPE cosine cache.
     pub cos_cache: Tensor,
+    /// Content-head RoPE sine cache.
     pub sin_cache: Tensor,
+    /// MLA rotary-head cosine cache.
     pub cos_cache_rope: Tensor,
+    /// MLA rotary-head sine cache.
     pub sin_cache_rope: Tensor,
+    /// YaRN attention scaling factor.
     pub attn_factor: f64,
 }
 
 impl ApexModel {
+    /// Builds a randomly initialized model from a validated config.
     pub fn new(config: ApexConfig, device: Device) -> Result<Self> {
         config.validate()?;
         let m = &config.model;
@@ -84,6 +103,7 @@ impl ApexModel {
         })
     }
 
+    /// Runs a token-ID forward pass and returns logits, caches, and optional hidden states.
     pub fn forward(
         &mut self,
         token_ids: &[Vec<u32>],
@@ -108,6 +128,7 @@ impl ApexModel {
         self.forward_embeddings(&x, positions, prefix_len, kv_caches, return_hidden)
     }
 
+    /// Runs a forward pass from already scaled embeddings.
     pub fn forward_embeddings(
         &mut self,
         scaled_embeddings: &Tensor,
@@ -178,6 +199,7 @@ impl ApexModel {
         })
     }
 
+    /// Returns the total number of represented model parameters.
     pub fn total_parameters(&self) -> usize {
         self.embedding.elem_count()
             + self.final_norm.parameters()
@@ -193,6 +215,7 @@ impl ApexModel {
                 .unwrap_or(0)
     }
 
+    /// Returns the number of parameters considered trainable.
     pub fn trainable_parameters(&self) -> usize {
         if self.config.peft.enabled {
             self.blocks
@@ -204,6 +227,7 @@ impl ApexModel {
         }
     }
 
+    /// Estimates active parameters used by one token path through MoE layers.
     pub fn active_parameters(&self) -> usize {
         let mut total = self.embedding.elem_count() + self.final_norm.parameters();
         for block in &self.blocks {
@@ -234,6 +258,7 @@ impl ApexModel {
         total
     }
 
+    /// Counts adapter-wrapped linear modules.
     pub fn count_lora_modules(&self) -> usize {
         let mut count = 0;
         for block in &self.blocks {
@@ -243,6 +268,7 @@ impl ApexModel {
         count
     }
 
+    /// Counts adapter modules whose base layer is 4-bit quantized.
     pub fn count_qlora_modules(&self) -> usize {
         let mut count = 0;
         for block in &self.blocks {
@@ -252,6 +278,7 @@ impl ApexModel {
         count
     }
 
+    /// Counts DoRA/QDoRA modules with magnitude vectors.
     pub fn count_dora_modules(&self) -> usize {
         let mut count = 0;
         for block in &self.blocks {
@@ -261,6 +288,7 @@ impl ApexModel {
         count
     }
 
+    /// Merges adapter weights into base layers and disables PEFT in config.
     pub fn merge_and_unload_adapters(&mut self) -> Result<()> {
         for block in &mut self.blocks {
             block.merge_and_unload()?;
@@ -269,6 +297,7 @@ impl ApexModel {
         Ok(())
     }
 
+    /// Collects all model tensors with stable checkpoint names.
     pub fn named_tensors(&self) -> Result<Vec<(String, Tensor)>> {
         let mut out = Vec::new();
         out.push(("embedding.weight".to_string(), self.embedding.clone()));
@@ -285,6 +314,7 @@ impl ApexModel {
         Ok(out)
     }
 
+    /// Collects only adapter tensors with stable checkpoint names.
     pub fn adapter_tensors(&self) -> Vec<(String, Tensor)> {
         let mut out = Vec::new();
         for (idx, block) in self.blocks.iter().enumerate() {
@@ -294,6 +324,7 @@ impl ApexModel {
     }
 }
 
+/// Returns the cached sequence length represented by a layer cache.
 pub fn cache_len(cache: &KvCache) -> usize {
     match cache {
         KvCache::Mla { c_kv, .. } => c_kv.dim(1).unwrap_or(0),
@@ -301,6 +332,7 @@ pub fn cache_len(cache: &KvCache) -> usize {
     }
 }
 
+/// Converts token IDs into embedding rows.
 fn embed_tokens(embedding: &Tensor, token_ids: &[Vec<u32>]) -> Result<Tensor> {
     let rows = embedding.to_vec2::<f32>()?;
     let b = token_ids.len();
@@ -321,6 +353,7 @@ fn embed_tokens(embedding: &Tensor, token_ids: &[Vec<u32>]) -> Result<Tensor> {
     Ok(Tensor::from_vec(values, (b, s, d), embedding.device())?)
 }
 
+/// Counts LoRA-family modules inside an attention layer.
 fn count_lora_attention(attn: &AttentionKind) -> usize {
     match attn {
         AttentionKind::Mla(a) => [
@@ -336,6 +369,7 @@ fn count_lora_attention(attn: &AttentionKind) -> usize {
     }
 }
 
+/// Counts quantized-adapter modules inside an attention layer.
 fn count_quant_attention(attn: &AttentionKind) -> usize {
     match attn {
         AttentionKind::Mla(a) => [
@@ -351,6 +385,7 @@ fn count_quant_attention(attn: &AttentionKind) -> usize {
     }
 }
 
+/// Counts DoRA-family modules inside an attention layer.
 fn count_dora_attention(attn: &AttentionKind) -> usize {
     match attn {
         AttentionKind::Mla(a) => [
@@ -366,6 +401,7 @@ fn count_dora_attention(attn: &AttentionKind) -> usize {
     }
 }
 
+/// Counts LoRA-family modules inside a dense FFN.
 fn count_lora_dense(ffn: &DenseFfn) -> usize {
     [&ffn.w_gate, &ffn.w_up, &ffn.w_down]
         .iter()
@@ -373,6 +409,7 @@ fn count_lora_dense(ffn: &DenseFfn) -> usize {
         .count()
 }
 
+/// Counts quantized-adapter modules inside a dense FFN.
 fn count_quant_dense(ffn: &DenseFfn) -> usize {
     [&ffn.w_gate, &ffn.w_up, &ffn.w_down]
         .iter()
@@ -380,6 +417,7 @@ fn count_quant_dense(ffn: &DenseFfn) -> usize {
         .count()
 }
 
+/// Counts DoRA-family modules inside a dense FFN.
 fn count_dora_dense(ffn: &DenseFfn) -> usize {
     [&ffn.w_gate, &ffn.w_up, &ffn.w_down]
         .iter()
@@ -387,6 +425,7 @@ fn count_dora_dense(ffn: &DenseFfn) -> usize {
         .count()
 }
 
+/// Counts LoRA-family modules inside an FFN variant.
 fn count_lora_ffn(ffn: &FfnKind) -> usize {
     match ffn {
         FfnKind::Dense(f) => count_lora_dense(f),
@@ -398,6 +437,7 @@ fn count_lora_ffn(ffn: &FfnKind) -> usize {
     }
 }
 
+/// Counts quantized-adapter modules inside an FFN variant.
 fn count_quant_ffn(ffn: &FfnKind) -> usize {
     match ffn {
         FfnKind::Dense(f) => count_quant_dense(f),
@@ -415,6 +455,7 @@ fn count_quant_ffn(ffn: &FfnKind) -> usize {
     }
 }
 
+/// Counts DoRA-family modules inside an FFN variant.
 fn count_dora_ffn(ffn: &FfnKind) -> usize {
     match ffn {
         FfnKind::Dense(f) => count_dora_dense(f),

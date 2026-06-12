@@ -2,6 +2,7 @@ use candle_core::{Device, Tensor};
 
 use crate::error::Result;
 
+/// Builds an APEX attention mask with bidirectional prefix and causal suffix.
 pub fn build_apex_attention_mask(
     prefix_len: usize,
     total_len: usize,
@@ -29,6 +30,7 @@ pub fn build_apex_attention_mask(
     mask
 }
 
+/// Converts a boolean attention mask into an additive `[1,1,Q,K]` tensor.
 pub fn additive_mask(
     mask: &[Vec<bool>],
     q_len: usize,

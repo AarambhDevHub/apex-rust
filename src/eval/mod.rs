@@ -1,3 +1,5 @@
+//! Evaluation metrics for token accuracy, perplexity, generation quality, and timing.
+
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -6,13 +8,18 @@ use crate::error::{ApexError, Result};
 use crate::model::ApexModel;
 use crate::train;
 
+/// Accuracy summary for next-token predictions.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClassificationMetrics {
+    /// Number of non-ignored labels.
     pub total: usize,
+    /// Number of predictions equal to the label.
     pub correct: usize,
+    /// `correct / total`, using zero-safe division.
     pub accuracy: f64,
 }
 
+/// Computes argmax next-token accuracy over `[B, S, V]` logits.
 pub fn next_token_accuracy(
     logits: &candle_core::Tensor,
     labels: &[Vec<i64>],
@@ -51,14 +58,20 @@ pub fn next_token_accuracy(
     })
 }
 
+/// Perplexity calculation result over one or more batches.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerplexityResult {
+    /// Mean cross-entropy loss.
     pub loss: f64,
+    /// Exponentiated loss with a clamp for numerical safety.
     pub perplexity: f64,
+    /// Number of valid next-token labels.
     pub token_count: usize,
+    /// Number of batches evaluated.
     pub batch_count: usize,
 }
 
+/// Computes language-model perplexity using pretraining loss.
 pub fn compute_perplexity(
     model: &mut ApexModel,
     batches: &[Vec<Vec<u32>>],
@@ -80,19 +93,29 @@ pub fn compute_perplexity(
     })
 }
 
+/// Forward-pass benchmark summary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BenchmarkResult {
+    /// Number of sequences in the benchmark input.
     pub batch_size: usize,
+    /// Tokens per sequence.
     pub seq_len: usize,
+    /// Number of repeated forward passes.
     pub repeats: usize,
+    /// Mean latency in milliseconds.
     pub mean_ms: f64,
+    /// Minimum latency in milliseconds.
     pub min_ms: f64,
+    /// Maximum latency in milliseconds.
     pub max_ms: f64,
+    /// Throughput measured from mean latency.
     pub tokens_per_second: f64,
+    /// Shape of the final logits tensor.
     pub logits_shape: Vec<usize>,
 }
 
 impl BenchmarkResult {
+    /// Formats benchmark metrics as a Markdown table.
     pub fn to_markdown(&self) -> String {
         format!(
             "| Metric | Value |\n|---|---:|\n| Batch size | {} |\n| Sequence length | {} |\n| Repeats | {} |\n| Mean forward time | {:.3} ms |\n| Tokens / second | {:.2} |\n| Logits shape | {:?} |",
@@ -106,6 +129,7 @@ impl BenchmarkResult {
     }
 }
 
+/// Runs repeated model forward passes and measures latency.
 pub fn run_forward_benchmark(
     model: &mut ApexModel,
     input_ids: &[Vec<u32>],
@@ -133,15 +157,22 @@ pub fn run_forward_benchmark(
     })
 }
 
+/// Lightweight generation-quality summary over decoded strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationQualityReport {
+    /// Number of generated strings.
     pub count: usize,
+    /// Mean whitespace-token length.
     pub average_length: f64,
+    /// Distinct unigram ratio.
     pub distinct_1: f64,
+    /// Distinct bigram ratio.
     pub distinct_2: f64,
+    /// Fraction of repeated whitespace tokens.
     pub repetition_rate: f64,
 }
 
+/// Evaluates decoded strings with simple diversity and repetition metrics.
 pub fn evaluate_generated_texts(texts: &[String]) -> GenerationQualityReport {
     GenerationQualityReport {
         count: texts.len(),
@@ -152,6 +183,7 @@ pub fn evaluate_generated_texts(texts: &[String]) -> GenerationQualityReport {
     }
 }
 
+/// Computes mean whitespace-token length.
 pub fn average_length(texts: &[String]) -> f64 {
     if texts.is_empty() {
         return 0.0;
@@ -163,6 +195,7 @@ pub fn average_length(texts: &[String]) -> f64 {
         / texts.len() as f64
 }
 
+/// Computes distinct-n ratio over whitespace tokens.
 pub fn distinct_n(texts: &[String], n: usize) -> f64 {
     let mut total = 0usize;
     let mut unique = std::collections::HashSet::new();
@@ -179,6 +212,7 @@ pub fn distinct_n(texts: &[String], n: usize) -> f64 {
     unique.len() as f64 / total.max(1) as f64
 }
 
+/// Computes the fraction of tokens that are repeats within each string.
 pub fn repetition_rate(texts: &[String]) -> f64 {
     let mut repeated = 0usize;
     let mut total = 0usize;

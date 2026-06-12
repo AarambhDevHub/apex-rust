@@ -16,127 +16,182 @@ use candle_core::Device;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing::{info, Level};
 
+/// Top-level CLI parser.
 #[derive(Parser, Debug)]
 #[command(name = "apex-rust")]
 #[command(about = "Rust/Candle language and vision model toolkit", version)]
 struct Cli {
+    /// Global tracing level.
     #[arg(long, global = true, default_value = "info")]
     log_level: String,
+    /// Subcommand to execute.
     #[command(subcommand)]
     command: Commands,
 }
 
+/// Supported top-level CLI commands.
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Runs one of the training modes.
     Train {
+        /// Concrete training subcommand.
         #[command(subcommand)]
         command: TrainCommand,
     },
+    /// Runs text generation.
     Infer(InferArgs),
+    /// Prints model architecture and parameter information.
     Inspect(InspectArgs),
+    /// Measures forward-pass performance.
     Benchmark(BenchmarkArgs),
+    /// Merges PEFT adapters into a plain model artifact.
     MergeAdapter(MergeAdapterArgs),
+    /// Tokenizer management commands.
     Tokenizer {
+        /// Concrete tokenizer subcommand.
         #[command(subcommand)]
         command: TokenizerCommand,
     },
 }
 
+/// Training command variants.
 #[derive(Subcommand, Debug)]
 enum TrainCommand {
+    /// Language-model pretraining dry loop.
     Pretrain(TrainArgs),
+    /// Supervised fine-tuning dry loop.
     Sft(TrainArgs),
+    /// PEFT supervised fine-tuning dry loop.
     PeftSft(TrainArgs),
+    /// Adapter-DPO dry loop.
     AdapterDpo(TrainArgs),
 }
 
+/// Shared training command arguments.
 #[derive(Args, Debug, Clone)]
 struct TrainArgs {
+    /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional JSONL dataset path.
     #[arg(long)]
     data: Option<PathBuf>,
+    /// Optional tokenizer JSON path.
     #[arg(long)]
     tokenizer: Option<PathBuf>,
+    /// Directory where artifacts are written.
     #[arg(long, default_value = "checkpoints/apex-rust")]
     output_dir: PathBuf,
+    /// Number of dry-loop steps to run.
     #[arg(long, default_value_t = 1)]
     steps: usize,
+    /// Stops after the first step.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 }
 
+/// Inference command arguments.
 #[derive(Args, Debug)]
 struct InferArgs {
+    /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional tokenizer JSON path.
     #[arg(long)]
     tokenizer: Option<PathBuf>,
+    /// Prompt text for chat formatting.
     #[arg(long)]
     prompt: Option<String>,
+    /// Uses synthetic token IDs instead of prompt text.
     #[arg(long, default_value_t = false)]
     random: bool,
+    /// Maximum generated token count.
     #[arg(long, default_value_t = 32)]
     max_new_tokens: usize,
+    /// Sampling temperature.
     #[arg(long, default_value_t = 0.7)]
     temperature: f64,
+    /// Nucleus sampling cutoff.
     #[arg(long, default_value_t = 0.9)]
     top_p: f64,
+    /// Top-k sampling cutoff.
     #[arg(long, default_value_t = 0)]
     top_k: usize,
+    /// Enables thinking-token generation mode.
     #[arg(long, default_value_t = false)]
     thinking: bool,
 }
 
+/// Inspect command arguments.
 #[derive(Args, Debug)]
 struct InspectArgs {
+    /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Output format for inspection.
     #[arg(long, value_enum, default_value_t = InspectFormat::Text)]
     format: InspectFormat,
 }
 
+/// Inspect output format.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum InspectFormat {
+    /// Human-readable text summary.
     Text,
+    /// JSON inspection report.
     Json,
 }
 
+/// Benchmark command arguments.
 #[derive(Args, Debug)]
 struct BenchmarkArgs {
+    /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Number of synthetic sequences.
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+    /// Tokens per synthetic sequence.
     #[arg(long, default_value_t = 16)]
     seq_len: usize,
+    /// Number of repeated forward passes.
     #[arg(long, default_value_t = 3)]
     repeats: usize,
 }
 
+/// Merge-adapter command arguments.
 #[derive(Args, Debug)]
 struct MergeAdapterArgs {
+    /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Directory where merged artifacts are written.
     #[arg(long, default_value = "checkpoints/apex-rust/merged")]
     output_dir: PathBuf,
 }
 
+/// Tokenizer command variants.
 #[derive(Subcommand, Debug)]
 enum TokenizerCommand {
+    /// Trains a byte-level BPE tokenizer.
     Train(TokenizerTrainArgs),
 }
 
+/// Tokenizer training arguments.
 #[derive(Args, Debug)]
 struct TokenizerTrainArgs {
+    /// Input text file used for tokenizer training.
     #[arg(long)]
     input: PathBuf,
+    /// Output tokenizer JSON path.
     #[arg(long)]
     output: PathBuf,
+    /// Target vocabulary size.
     #[arg(long, default_value_t = 32_000)]
     vocab_size: usize,
 }
 
+/// Parses CLI arguments and dispatches to a command handler.
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
@@ -152,6 +207,7 @@ fn main() -> Result<()> {
     }
 }
 
+/// Initializes tracing with a string log-level value.
 fn init_tracing(level: &str) {
     let level = match level {
         "trace" => Level::TRACE,
@@ -166,6 +222,7 @@ fn init_tracing(level: &str) {
         .try_init();
 }
 
+/// Dispatches to the selected training mode.
 fn run_train(command: TrainCommand) -> Result<()> {
     match command {
         TrainCommand::Pretrain(args) => run_pretrain(args),
@@ -175,6 +232,7 @@ fn run_train(command: TrainCommand) -> Result<()> {
     }
 }
 
+/// Runs pretraining-style forward/loss steps and writes artifacts.
 fn run_pretrain(args: TrainArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
@@ -206,6 +264,7 @@ fn run_pretrain(args: TrainArgs) -> Result<()> {
     write_train_outputs(&args.output_dir, &cfg, last_loss, &model)
 }
 
+/// Runs SFT or PEFT-SFT forward/loss steps and writes artifacts.
 fn run_sft(args: TrainArgs, peft: bool) -> Result<()> {
     let default_cfg = if peft {
         get_tiny_lora_config
@@ -252,6 +311,7 @@ fn run_sft(args: TrainArgs, peft: bool) -> Result<()> {
     write_train_outputs(&args.output_dir, &cfg, last_loss, &model)
 }
 
+/// Runs adapter-DPO scoring steps and writes policy artifacts.
 fn run_adapter_dpo(args: TrainArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), || {
         get_tiny_adapter_dpo_config(PeftMethod::Dora)
@@ -301,6 +361,7 @@ fn run_adapter_dpo(args: TrainArgs) -> Result<()> {
     write_train_outputs(&args.output_dir, &cfg, last_loss, &policy)
 }
 
+/// Runs autoregressive generation from prompt text or synthetic token IDs.
 fn run_infer(args: InferArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
@@ -341,6 +402,7 @@ fn run_infer(args: InferArgs) -> Result<()> {
     Ok(())
 }
 
+/// Prints model inspection in text or JSON form.
 fn run_inspect(args: InspectArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let model = ApexModel::new(cfg, Device::Cpu)?;
@@ -364,6 +426,7 @@ fn run_inspect(args: InspectArgs) -> Result<()> {
     Ok(())
 }
 
+/// Runs a forward-pass benchmark and prints JSON plus Markdown summaries.
 fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
@@ -381,6 +444,7 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     Ok(())
 }
 
+/// Merges adapters into base weights and writes merged checkpoint artifacts.
 fn run_merge_adapter(args: MergeAdapterArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_lora_config)?;
     let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
@@ -408,12 +472,14 @@ fn run_merge_adapter(args: MergeAdapterArgs) -> Result<()> {
     Ok(())
 }
 
+/// Trains a tokenizer from a text file.
 fn run_tokenizer_train(args: TokenizerTrainArgs) -> Result<()> {
     train_bpe_tokenizer(&args.input, &args.output, args.vocab_size)?;
     println!("wrote tokenizer to {}", args.output.display());
     Ok(())
 }
 
+/// Loads a config from disk or falls back to a provided preset builder.
 fn load_config_or(path: Option<&Path>, default: impl FnOnce() -> ApexConfig) -> Result<ApexConfig> {
     match path {
         Some(path) => ApexConfig::from_yaml(path),
@@ -421,6 +487,7 @@ fn load_config_or(path: Option<&Path>, default: impl FnOnce() -> ApexConfig) -> 
     }
 }
 
+/// Builds deterministic synthetic token IDs within the configured vocabulary.
 fn synthetic_tokens(seq_len: usize, vocab_size: usize) -> Vec<u32> {
     let limit = vocab_size.max(16) as u32;
     (0..seq_len.max(2))
@@ -428,6 +495,7 @@ fn synthetic_tokens(seq_len: usize, vocab_size: usize) -> Vec<u32> {
         .collect()
 }
 
+/// Writes config, metadata, model weights, and optional adapter weights.
 fn write_train_outputs(
     output_dir: &Path,
     cfg: &ApexConfig,
