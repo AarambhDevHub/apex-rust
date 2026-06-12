@@ -1,0 +1,41 @@
+[package]
+name = "apex-rust"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Rust/Candle language and vision model implementation"
+
+[lib]
+name = "apex_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "apex-rust"
+path = "src/main.rs"
+
+[features]
+default = []
+image = ["dep:image"]
+
+[dependencies]
+anyhow = "1"
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+candle-transformers = "0.10.2"
+clap = { version = "4.5", features = ["derive"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
+rand = "0.9"
+rand_distr = "0.5"
+safetensors = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+tokenizers = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

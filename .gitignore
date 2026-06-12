@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+
+# Local training/checkpoint outputs
+/checkpoints/
+/outputs/
+/**/*.safetensors
+/**/*.pt
+/**/*.pth
+/**/*.ckpt
+
+# Generated tokenizer/model artifacts
+/target-apex/
+*.tokenizer.json
+
+# Logs and reports
+*.log
+*.trace
+
+# Environment files
+.env
+.env.*
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
