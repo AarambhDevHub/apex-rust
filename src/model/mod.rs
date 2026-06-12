@@ -6,6 +6,7 @@ mod block;
 mod ffn;
 mod linear;
 mod load_balancer;
+mod loading;
 mod mask;
 mod multi_token_head;
 mod norm;
@@ -21,6 +22,7 @@ pub use linear::{
     BaseLinear, LinearLayer, PlainLinear, QuantizedLinear4Bit, QuantizedWeight4Bit,
 };
 pub use load_balancer::{LoadBalancer, LoadBalancerStats};
+pub use loading::{load_adapter_tensors, load_full_tensors, TensorLoadReport};
 pub use mask::{additive_mask, build_apex_attention_mask};
 pub use multi_token_head::MultiTokenHead;
 pub use norm::RmsNorm;

@@ -112,6 +112,41 @@ pub fn get_tiny_adapter_dpo_config(method: PeftMethod) -> ApexConfig {
     cfg
 }
 
+/// Builds a tiny adapter inference configuration for the selected PEFT method.
+pub fn get_tiny_adapter_inference_config(method: PeftMethod) -> ApexConfig {
+    let mut cfg = match method {
+        PeftMethod::Lora => get_tiny_lora_config(),
+        PeftMethod::Qlora => get_tiny_qlora_config(),
+        PeftMethod::Dora => get_tiny_dora_config(),
+        PeftMethod::Qdora => get_tiny_qdora_config(),
+    };
+    cfg.generation.max_new_tokens = 64;
+    cfg.generation.temperature = 0.7;
+    cfg.generation.top_p = 0.9;
+    cfg.generation.use_speculative = true;
+    cfg
+}
+
+/// Builds a tiny LoRA adapter inference configuration.
+pub fn get_tiny_lora_inference_config() -> ApexConfig {
+    get_tiny_adapter_inference_config(PeftMethod::Lora)
+}
+
+/// Builds a tiny QLoRA adapter inference configuration.
+pub fn get_tiny_qlora_inference_config() -> ApexConfig {
+    get_tiny_adapter_inference_config(PeftMethod::Qlora)
+}
+
+/// Builds a tiny DoRA adapter inference configuration.
+pub fn get_tiny_dora_inference_config() -> ApexConfig {
+    get_tiny_adapter_inference_config(PeftMethod::Dora)
+}
+
+/// Builds a tiny QDoRA adapter inference configuration.
+pub fn get_tiny_qdora_inference_config() -> ApexConfig {
+    get_tiny_adapter_inference_config(PeftMethod::Qdora)
+}
+
 /// Builds a tiny vision-enabled configuration for multimodal tests.
 pub fn get_tiny_vision_config() -> ApexConfig {
     let mut cfg = get_tiny_config();

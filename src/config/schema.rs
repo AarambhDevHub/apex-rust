@@ -176,6 +176,49 @@ impl Default for ThinkingConfig {
     }
 }
 
+/// Runtime generation defaults used by inference commands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GenerationRuntimeConfig {
+    /// Maximum number of new tokens to generate.
+    pub max_new_tokens: usize,
+    /// Default sampling temperature.
+    pub temperature: f64,
+    /// Nucleus sampling probability cutoff.
+    pub top_p: f64,
+    /// Top-k sampling cutoff; zero disables top-k.
+    pub top_k: usize,
+    /// Repetition penalty applied to generated token logits.
+    pub repetition_penalty: f64,
+    /// Enables thinking-token controls without requiring a CLI flag.
+    pub enable_thinking: bool,
+    /// Maximum tokens allowed inside the thinking phase.
+    pub max_thinking_tokens: usize,
+    /// Sampling temperature inside the thinking phase.
+    pub thinking_temperature: f64,
+    /// Sampling temperature after the thinking phase.
+    pub output_temperature: f64,
+    /// Enables speculative decoding when multi-token heads exist.
+    pub use_speculative: bool,
+}
+
+impl Default for GenerationRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_new_tokens: 128,
+            temperature: 0.7,
+            top_p: 0.9,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            enable_thinking: false,
+            max_thinking_tokens: 1024,
+            thinking_temperature: 0.6,
+            output_temperature: 0.3,
+            use_speculative: false,
+        }
+    }
+}
+
 /// Vision encoder and projector settings for multimodal runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -462,6 +505,8 @@ pub struct ApexConfig {
     pub multi_token_head: MultiTokenHeadConfig,
     /// Thinking-token generation settings.
     pub thinking: ThinkingConfig,
+    /// Inference-time generation defaults.
+    pub generation: GenerationRuntimeConfig,
     /// Multimodal vision settings.
     pub vision: VisionConfig,
     /// Adapter/PEFT settings.
@@ -607,6 +652,35 @@ impl ApexConfig {
                     "adapter_dpo.label_smoothing must be in [0, 0.5)".to_string(),
                 ));
             }
+        }
+        let generation = &self.generation;
+        if generation.max_new_tokens == 0 {
+            return Err(ApexError::Config(
+                "generation.max_new_tokens must be positive".to_string(),
+            ));
+        }
+        if generation.temperature < 0.0
+            || generation.thinking_temperature < 0.0
+            || generation.output_temperature < 0.0
+        {
+            return Err(ApexError::Config(
+                "generation temperatures must be non-negative".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&generation.top_p) {
+            return Err(ApexError::Config(
+                "generation.top_p must be in [0, 1]".to_string(),
+            ));
+        }
+        if generation.repetition_penalty <= 0.0 {
+            return Err(ApexError::Config(
+                "generation.repetition_penalty must be positive".to_string(),
+            ));
+        }
+        if generation.max_thinking_tokens == 0 {
+            return Err(ApexError::Config(
+                "generation.max_thinking_tokens must be positive".to_string(),
+            ));
         }
         Ok(())
     }

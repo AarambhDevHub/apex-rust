@@ -107,6 +107,9 @@ Preset YAML files live in `configs/`:
 | `small_vision.yaml` | Small vision-language model |
 | `medium_vision.yaml` | Medium vision-language model |
 | `large_vision.yaml` | Large vision-language model |
+| `tiny_{lora,qlora,dora,qdora}.yaml` | Adapter training models |
+| `tiny_{lora,qlora,dora,qdora}_dpo.yaml` | Adapter-DPO alignment models |
+| `tiny_{lora,qlora,dora,qdora}_inference.yaml` | Adapter inference and merge models |
 
 Major sections:
 
@@ -118,6 +121,7 @@ Major sections:
 | `skip_gate` | Conditional FFN compute gate |
 | `multi_token_head` | Auxiliary speculative heads |
 | `thinking` | Thinking-mode generation limits |
+| `generation` | Inference sampling and speculative decoding defaults |
 | `vision` | Image size, patch size, projector, visual-token count |
 | `peft` | LoRA/QLoRA/DoRA/QDoRA settings |
 | `training` | Batch, sequence length, LR schedule, optimizer fields |
@@ -132,6 +136,8 @@ Important validation rules:
 - vision image size must be divisible by patch size
 - PEFT rank and alpha must be positive
 - adapter-DPO requires PEFT to be enabled
+- generation token budget must be positive
+- generation temperatures must be non-negative and `top_p` must be in `[0, 1]`
 
 ---
 
@@ -161,10 +167,13 @@ Weight tying reduces parameters and keeps input/output token geometry aligned.
 Vision mode converts an image into a fixed number of continuous visual tokens.
 
 ```txt
-Image [B, C, H, W]
+Image path, HWC buffer, or CHW buffer
         │
         ▼
 ImagePreprocessor
+        │ convert to CHW, expand grayscale/RGB, resize, normalize
+        ▼
+Image tensor [B, C, H, W]
         │
         ▼
 NativeVisionEncoder
@@ -187,6 +196,14 @@ final_seq_len = text_seq_len - img_placeholders
 ```
 
 Text-only forward passes bypass the vision wrapper completely.
+
+The preprocessing stage accepts CHW `ImageTensor` values directly and can
+convert HWC buffers into CHW layout. It clamps byte-scaled values into `[0, 1]`,
+supports grayscale-to-RGB and RGB-to-grayscale conversion when the config
+requires it, resizes with CPU bilinear sampling, and normalizes with CLIP-style
+channel statistics. File loading is behind the optional `image` feature and
+uses the `image` crate to decode PNG/JPEG inputs before the same preprocessing
+pipeline.
 
 ---
 
@@ -358,6 +375,7 @@ Sampling controls:
 - repetition penalty
 - EOS handling
 - thinking-mode temperature/budget controls
+- multi-token-head speculative decoding
 
 The generator returns token IDs plus completion metadata:
 
@@ -368,18 +386,49 @@ total_tokens
 finished
 ```
 
+Speculative decoding is implemented in `ApexGenerator::generate_with_speculative`.
+The main model performs the prefill step, auxiliary multi-token heads greedily
+draft future tokens from the last hidden state, and the main model verifies
+`[main_token, draft_tokens...]` in one decode pass. Accepted draft tokens extend
+the context directly. Rejected drafts are replaced by a sampled verifier token,
+then the KV cache is rebuilt from the accepted context so later decode steps do
+not carry rejected tokens.
+
+Thinking-mode generation uses the standard one-token decode loop because the
+thinking budget can force replacement tokens that need strict per-token control.
+
 ---
 
 ## 12. Training And Alignment Helpers
 
 Training utilities include:
 
+- JSONL readers for pretrain, SFT, preference, and vision rows
+- vector-backed batch builders for pretrain, SFT, and preference samples
+- streaming pretrain iterator that tokenizes text files line by line
+- vision text collation with prompt-label masking
 - pretrain next-token cross entropy
 - SFT assistant-token-only loss
 - vision SFT label expansion and loss
 - cosine warmup schedule
+- vector-backed AdamW update math and moment state
+- global gradient norm calculation and clipping
+- gradient accumulation and best-validation-loss state helpers
 - checkpoint metadata
 - single-process CPU smoke runners
+
+Pretrain batches carry `input_ids` and `attention_mask`. The streaming iterator
+emits padded final chunks only when at least half a sequence remains, and masks
+padding tokens as zero so loss code can ignore them. Preference batches pad
+chosen and rejected sequences separately and keep prompt lengths for response
+log-probability slicing. Vision collation formats text around `<|img|>` and
+creates labels with prompt positions set to `IGNORE_INDEX`; pixel loading stays
+inside `vision::ImagePreprocessor`.
+
+The optimizer utilities operate on flat `Vec<f32>` parameter and gradient
+buffers. This keeps AdamW, weight decay, clipping, and accumulation semantics
+testable on CPU while leaving full Candle autograd wiring as a future
+training-loop layer.
 
 Alignment utilities include:
 
@@ -388,6 +437,29 @@ Alignment utilities include:
 - adapter-DPO step metrics
 - GRPO-style normalized advantages
 - clipped policy loss helper
+- scalar reward model with last-non-padded hidden-state scoring
+- Bradley-Terry reward-model loss
+- process reward model that scores cumulative reasoning steps
+- constitutional critique, scoring, revision, and DPO pair generation
+- weighted combined reward from outcome, process, and constitutional signals
+
+The alignment module is split into focused files:
+
+```txt
+alignment/dpo.rs              sequence log-probs, DPO, adapter-DPO metrics
+alignment/grpo.rs             normalized advantages and clipped policy loss
+alignment/reward.rs           scalar reward head and Bradley-Terry loss
+alignment/prm.rs              process reward model step scoring
+alignment/constitutional.rs   principle critique and revision wrapper
+alignment/combined_reward.rs  outcome/process/constitutional reward mix
+```
+
+Reward models use the transformer as a hidden-state feature extractor. The
+sequence reward reads the final non-padded hidden state, while PRM appends each
+reasoning step to the prompt context and scores the last hidden state through a
+sigmoid head. Constitutional critique is generator-agnostic through a small
+`TextGenerator` trait; an empty generator gives the same safe no-op fallback used
+for untrained/local validation paths.
 
 ---
 
@@ -406,6 +478,31 @@ Named tensor export walks the model graph. Quantized base weights are exported
 as dequantized F32 tensors, while adapter tensors are kept in a separate adapter
 payload when applicable.
 
+The same named tensors can be loaded back into an existing model instance:
+
+```txt
+config.yaml + model.safetensors
+  → ApexModel::new(config)
+  → load_model_safetensors(...)
+
+config.yaml + adapter.safetensors
+  → ApexModel::new(adapter-enabled config)
+  → load_adapter_safetensors(...)
+```
+
+Loading is strict for CLI commands. Missing tensors, unexpected tensors, or
+shape mismatches fail early. QLoRA and QDoRA base weights are loaded from F32
+payloads and re-quantized into the configured 4-bit representation in memory.
+
+CLI commands that can consume saved tensors:
+
+```txt
+infer          --weights <model.safetensors> --adapter <adapter.safetensors>
+inspect        --weights <model.safetensors> --adapter <adapter.safetensors>
+benchmark      --weights <model.safetensors> --adapter <adapter.safetensors>
+merge-adapter  --weights <model.safetensors> --adapter <adapter.safetensors>
+```
+
 ---
 
 ## 14. Module Layout
@@ -417,6 +514,7 @@ src/model/
   block.rs
   ffn.rs
   linear.rs
+  loading.rs
   load_balancer.rs
   mask.rs
   multi_token_head.rs
@@ -432,6 +530,7 @@ src/vision/
 
 src/train/
   losses.rs
+  optimizer.rs
   scheduler.rs
   checkpoint.rs
   runner.rs
@@ -444,6 +543,14 @@ src/tokenizer/
 src/data/
   types.rs
   readers.rs
+  batching.rs
+
+src/utils/
+  params.rs
+  inspection.rs
+  flops.rs
+  diagram.rs
+  shape.rs
 ```
 
 Folder `mod.rs` files are intentionally small and only declare/re-export the
@@ -457,5 +564,6 @@ focused implementation files.
 - CUDA is not enabled by default.
 - Training commands run data loading, forward/loss paths, metadata writing, and
   safetensors export.
-- Checkpoints are native safetensors plus JSON/YAML sidecars.
+- Checkpoints are native safetensors plus JSON/YAML sidecars and can be loaded
+  by inference, inspection, benchmark, and adapter-merge commands.
 - Numeric outputs are determined by Rust initialization and Candle operations.

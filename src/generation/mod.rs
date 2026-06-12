@@ -166,6 +166,33 @@ pub fn sample_next_token(
     }
 }
 
+/// Converts logits into filtered probabilities using the same sampling controls.
+pub fn filtered_probabilities(
+    raw_logits: &[f32],
+    cfg: &GenerationConfig,
+    temperature: f64,
+    generated: &[u32],
+) -> Vec<f32> {
+    if raw_logits.is_empty() {
+        return Vec::new();
+    }
+    let mut logits = raw_logits.to_vec();
+    apply_repetition_penalty(&mut logits, generated, cfg.repetition_penalty);
+    if temperature <= 0.0 {
+        let mut probs = vec![0.0; logits.len()];
+        if let Some(idx) = tensor::top_k_indices(&logits, 1).into_iter().next() {
+            probs[idx] = 1.0;
+        }
+        return probs;
+    }
+    for v in &mut logits {
+        *v /= temperature as f32;
+    }
+    apply_top_k(&mut logits, cfg.top_k);
+    apply_top_p(&mut logits, cfg.top_p);
+    tensor::safe_probs_from_logits(&logits)
+}
+
 /// Stateful generator borrowing a mutable model during decoding.
 pub struct ApexGenerator<'a> {
     /// Model used for forward passes and KV-cache updates.
@@ -185,6 +212,15 @@ impl<'a> ApexGenerator<'a> {
         if self.config.use_speculative {
             return self.generate_with_speculative(input_ids, prefix_len);
         }
+        self.generate_standard(input_ids, prefix_len)
+    }
+
+    /// Generates tokens with the standard one-token decode loop.
+    fn generate_standard(
+        &mut self,
+        input_ids: Vec<u32>,
+        prefix_len: usize,
+    ) -> Result<GenerationOutput> {
         let cfg = self.config.clone();
         let mut generated = Vec::new();
         let mut thinking_tokens = 0usize;
@@ -239,10 +275,136 @@ impl<'a> ApexGenerator<'a> {
         input_ids: Vec<u32>,
         prefix_len: usize,
     ) -> Result<GenerationOutput> {
-        let mut out = self.generate(input_ids, prefix_len)?;
-        out.token_ids.truncate(self.config.max_new_tokens);
-        out.total_tokens = out.token_ids.len();
-        Ok(out)
+        let cfg = self.config.clone();
+        let draft_head_count = self
+            .model
+            .multi_token_head
+            .as_ref()
+            .map(|head| head.heads.len())
+            .unwrap_or(0);
+        if cfg.enable_thinking || draft_head_count == 0 {
+            return self.generate_standard(input_ids, prefix_len);
+        }
+
+        let mut context_ids = input_ids.clone();
+        let mut generated = Vec::new();
+        let mut output = self
+            .model
+            .forward(&[input_ids], None, prefix_len, None, true)?;
+        let mut next_logits = last_logits(&output.logits)?;
+        let mut hidden_states = output.hidden_states.clone();
+        let mut kv_caches = Some(output.kv_caches);
+
+        while generated.len() < cfg.max_new_tokens {
+            let main_token = sample_next_token(&next_logits, &cfg, cfg.temperature, &generated);
+            push_generated(&mut generated, &mut context_ids, main_token);
+            if main_token == cfg.eos_token_id || generated.len() >= cfg.max_new_tokens {
+                break;
+            }
+
+            let draft_ids = match (&self.model.multi_token_head, hidden_states.as_ref()) {
+                (Some(head), Some(hidden)) => head.draft_tokens(hidden)?,
+                _ => Vec::new(),
+            };
+            if draft_ids.is_empty() {
+                output =
+                    self.model
+                        .forward(&[vec![main_token]], None, 0, kv_caches.as_deref(), true)?;
+                next_logits = last_logits(&output.logits)?;
+                hidden_states = output.hidden_states.clone();
+                kv_caches = Some(output.kv_caches);
+                continue;
+            }
+
+            let remaining = cfg.max_new_tokens.saturating_sub(generated.len());
+            let draft_ids = draft_ids.into_iter().take(remaining).collect::<Vec<_>>();
+            let mut verify_input = Vec::with_capacity(1 + draft_ids.len());
+            verify_input.push(main_token);
+            verify_input.extend(draft_ids.iter().copied());
+
+            output = self
+                .model
+                .forward(&[verify_input], None, 0, kv_caches.as_deref(), true)?;
+            let verify_logits = output.logits.to_vec3::<f32>()?;
+            kv_caches = Some(output.kv_caches);
+            hidden_states = output.hidden_states.clone();
+
+            let Some(token_logits) = verify_logits.first() else {
+                output =
+                    self.model
+                        .forward(&[context_ids.clone()], None, prefix_len, None, true)?;
+                next_logits = last_logits(&output.logits)?;
+                hidden_states = output.hidden_states.clone();
+                kv_caches = Some(output.kv_caches);
+                continue;
+            };
+            let vocab_len = token_logits.first().map(Vec::len).unwrap_or(0).max(1);
+            let mut accepted = 0usize;
+            let mut rejected = false;
+
+            for (idx, draft_id) in draft_ids.iter().copied().enumerate() {
+                if generated.len() >= cfg.max_new_tokens {
+                    break;
+                }
+                let Some(logits) = token_logits.get(idx) else {
+                    break;
+                };
+                let target_prob = token_probability(logits, draft_id, &cfg, &generated);
+                let draft_prob = 1.0 / vocab_len as f64;
+                let accept_prob = (target_prob / draft_prob.max(1e-10)).clamp(0.0, 1.0);
+                let accept = if cfg.temperature <= 0.0 {
+                    sample_next_token(logits, &cfg, 0.0, &generated) == draft_id
+                } else {
+                    rand::rng().random::<f64>() < accept_prob
+                };
+
+                if accept {
+                    push_generated(&mut generated, &mut context_ids, draft_id);
+                    accepted += 1;
+                    if draft_id == cfg.eos_token_id {
+                        break;
+                    }
+                } else {
+                    let resampled = sample_next_token(logits, &cfg, cfg.temperature, &generated);
+                    push_generated(&mut generated, &mut context_ids, resampled);
+                    rejected = true;
+                    output =
+                        self.model
+                            .forward(&[context_ids.clone()], None, prefix_len, None, true)?;
+                    next_logits = last_logits(&output.logits)?;
+                    hidden_states = output.hidden_states.clone();
+                    kv_caches = Some(output.kv_caches);
+                    break;
+                }
+            }
+
+            if generated.last().copied() == Some(cfg.eos_token_id)
+                || generated.len() >= cfg.max_new_tokens
+            {
+                break;
+            }
+            if rejected {
+                continue;
+            }
+            let next_idx = accepted.min(token_logits.len().saturating_sub(1));
+            if let Some(logits) = token_logits.get(next_idx) {
+                next_logits = logits.clone();
+            } else {
+                output =
+                    self.model
+                        .forward(&[context_ids.clone()], None, prefix_len, None, true)?;
+                next_logits = last_logits(&output.logits)?;
+                hidden_states = output.hidden_states.clone();
+                kv_caches = Some(output.kv_caches);
+            }
+        }
+
+        Ok(GenerationOutput {
+            finished: generated.last().copied() == Some(cfg.eos_token_id),
+            total_tokens: generated.len(),
+            token_ids: generated,
+            thinking_tokens: 0,
+        })
     }
 
     /// Returns the previous sequence length represented by a KV-cache set.
@@ -254,4 +416,21 @@ impl<'a> ApexGenerator<'a> {
 fn last_logits(logits: &candle_core::Tensor) -> Result<Vec<f32>> {
     let seq = logits.dim(1)?;
     Ok(logits.i((0, seq - 1, ..))?.to_vec1::<f32>()?)
+}
+
+fn token_probability(
+    logits: &[f32],
+    token_id: u32,
+    cfg: &GenerationConfig,
+    generated: &[u32],
+) -> f64 {
+    filtered_probabilities(logits, cfg, cfg.temperature, generated)
+        .get(token_id as usize)
+        .copied()
+        .unwrap_or(0.0) as f64
+}
+
+fn push_generated(generated: &mut Vec<u32>, context_ids: &mut Vec<u32>, token_id: u32) {
+    generated.push(token_id);
+    context_ids.push(token_id);
 }

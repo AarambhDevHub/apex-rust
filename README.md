@@ -44,18 +44,24 @@ inspectable implementation that builds and runs locally on CPU.
 | Area | Status |
 |---|---|
 | YAML config schema and validation | Complete |
+| Text, vision, PEFT, DPO, and inference YAML presets | Complete |
 | Tokenizer JSON loading and BPE training | Complete |
 | Pretrain, SFT, preference, and vision JSONL readers | Complete |
+| Batch builders, streaming pretrain iterator, vision text collator | Complete |
 | RMSNorm, RoPE/YaRN, masks, attention, FFN, MoE, skip gate | Complete |
 | MLA and GQA sliding-window attention | Complete |
 | KV-cache generation | Complete |
 | Top-k, top-p, temperature, repetition penalty | Complete |
 | Thinking-mode generation controls | Complete |
+| Multi-token-head speculative decoding | Complete |
 | LoRA, QLoRA, DoRA, QDoRA wrappers | Complete |
 | 4-bit pack/unpack and quantize/dequantize helpers | Complete |
 | Adapter merge/unload | Complete |
-| Native vision patch encoder and projector | Complete |
-| Safetensors model and adapter export | Complete |
+| Vision preprocessing, native patch encoder, and projector | Complete |
+| Safetensors model and adapter save/load | Complete |
+| Reward model, PRM, constitutional AI, combined reward | Complete |
+| Inspection, FLOPs, parameter, diagram, shape-check utilities | Complete |
+| AdamW math, gradient clipping, training-state helpers | Complete |
 | Inspect, infer, benchmark, train, merge, tokenizer CLI | Complete |
 | CUDA backend | Not enabled by default |
 
@@ -121,20 +127,38 @@ src/
   main.rs              CLI entry point
   lib.rs               Public crate exports
   config/              YAML config schema and presets
-  data/                JSONL readers and sample structs
+  data/                JSONL readers, batch builders, streaming pretrain
   model/               Transformer, attention, FFN, MoE, PEFT, checkpoints
   vision/              Image preprocessing, encoder, projector, wrapper
   tokenizer/           Tokenizer runtime, special tokens, BPE trainer
   generation/          Sampling and autoregressive generation
   train/               Losses, scheduler, checkpoint export, smoke runners
-  alignment/           DPO, adapter-DPO, GRPO helpers
+  alignment/           DPO, GRPO, reward model, PRM, constitutional AI
   eval/                Metrics, perplexity, benchmark helpers
   tensor/              Candle tensor utilities
-  utils/               Inspection, FLOPs, parameter reports
+  utils/               Inspection, FLOPs, parameters, diagrams, shape checks
 configs/               YAML presets for text and vision model sizes
 examples/              Small runnable examples
 tests/                 Core and CLI tests
 ```
+
+---
+
+## Vision Preprocessing
+
+`ImagePreprocessor` accepts CHW image buffers directly, converts HWC input into
+CHW layout, expands grayscale to RGB when the config expects three channels,
+clamps byte-scaled values into `[0, 1]`, resizes to `vision.image_size`, and
+normalizes with CLIP-style channel statistics.
+
+With the optional `image` feature enabled, it can also load PNG/JPEG files:
+
+```bash
+cargo test --all-features vision_preprocessor_loads_image_file
+```
+
+The model wrapper still expects a Candle tensor with shape `[B, C, H, W]`; use
+`ImagePreprocessor::preprocess_to_tensor` or `batch_to_tensor` to build it.
 
 ---
 
@@ -151,6 +175,21 @@ Run random-token inference:
 
 ```bash
 cargo run -- infer --random --max-new-tokens 8 --temperature 0
+```
+
+Run speculative decoding when the config enables multi-token heads:
+
+```bash
+cargo run -- infer --random --max-new-tokens 8 --temperature 0 --speculative
+```
+
+Run inference from saved artifacts:
+
+```bash
+cargo run -- infer \
+  --config checkpoints/apex-rust/config.yaml \
+  --weights checkpoints/apex-rust/model.safetensors \
+  --prompt "Hello"
 ```
 
 Benchmark a forward pass:
@@ -192,6 +231,21 @@ Built-in YAML presets:
 | `configs/medium.yaml` | `configs/medium_vision.yaml` | Mid-size training runs |
 | `configs/large.yaml` | `configs/large_vision.yaml` | Large model configuration |
 
+Adapter presets:
+
+```txt
+configs/tiny_lora.yaml              configs/tiny_lora_dpo.yaml
+configs/tiny_qlora.yaml             configs/tiny_qlora_dpo.yaml
+configs/tiny_dora.yaml              configs/tiny_dora_dpo.yaml
+configs/tiny_qdora.yaml             configs/tiny_qdora_dpo.yaml
+configs/tiny_lora_inference.yaml    configs/tiny_qlora_inference.yaml
+configs/tiny_dora_inference.yaml    configs/tiny_qdora_inference.yaml
+```
+
+Inference presets include a `generation` section for defaults such as
+`max_new_tokens`, `temperature`, `top_p`, repetition penalty, thinking
+temperatures, and speculative decoding.
+
 ---
 
 ## Examples
@@ -219,10 +273,10 @@ apex-rust train pretrain      --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust train sft           --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust train peft-sft      --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust train adapter-dpo   --config <yaml> --data <jsonl> --output-dir <dir>
-apex-rust infer               --config <yaml> --prompt <text>
-apex-rust inspect             --config <yaml> --format text|json
-apex-rust benchmark           --config <yaml> --seq-len <n> --repeats <n>
-apex-rust merge-adapter       --config <yaml> --output-dir <dir>
+apex-rust infer               --config <yaml> --weights <model.safetensors> --adapter <adapter.safetensors> --prompt <text> --speculative
+apex-rust inspect             --config <yaml> --weights <model.safetensors> --adapter <adapter.safetensors> --format text|json
+apex-rust benchmark           --config <yaml> --weights <model.safetensors> --seq-len <n> --repeats <n>
+apex-rust merge-adapter       --config <yaml> --weights <model.safetensors> --adapter <adapter.safetensors> --output-dir <dir>
 apex-rust tokenizer train     --input <text-file> --output <tokenizer.json>
 ```
 
@@ -256,6 +310,11 @@ Vision JSONL:
 {"image":"image.png","prompt":"<|img|> What is shown?","response":"A chart."}
 ```
 
+The data API also exposes batch builders for pretrain, SFT, and preference
+samples, a lazy streaming pretrain iterator over text files, padding helpers,
+and a vision text collator that creates token labels while leaving image
+decoding to the vision preprocessing layer.
+
 ---
 
 ## Checkpoints
@@ -274,6 +333,16 @@ output/
 `model.safetensors` stores named F32 tensors. Adapter checkpoints store LoRA,
 DoRA, QLoRA, or QDoRA adapter tensors separately when applicable.
 
+Load paths are strict by default: tensor names and shapes must match the model
+created from `--config`. QLoRA/QDoRA base weights are saved as dequantized F32
+and re-quantized into the configured 4-bit representation when loaded.
+
+The training support layer includes cosine warmup scheduling, loss functions,
+checkpoint writing, vector-backed AdamW update math, global gradient clipping,
+and gradient-accumulation state helpers. The current CLI training modes remain
+CPU smoke loops around forward/loss/checkpoint paths; full Candle autograd
+updates over every model tensor are a future integration layer.
+
 ---
 
 ## Validation
@@ -287,8 +356,10 @@ cargo test
 
 The test suite covers config roundtrip, tokenizer/chat behavior, data readers,
 RoPE/YaRN, masks, RMSNorm, load balancer, full model forward/losses, PEFT
-insertion and merge, 4-bit quantization, generation sampling, vision-token
-insertion, safetensors export, DPO/GRPO helpers, and CLI smoke tests.
+insertion and merge, 4-bit quantization, generation sampling, data batching,
+streaming masks, vision-token insertion, safetensors save/load, DPO/GRPO
+helpers, reward/PRM scoring, constitutional critique, combined rewards, utility
+reports, shape verification, and CLI smoke tests.
 
 ---
 

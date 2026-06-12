@@ -96,6 +96,12 @@ struct InferArgs {
     /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional full-model safetensors path.
+    #[arg(long)]
+    weights: Option<PathBuf>,
+    /// Optional adapter-only safetensors path.
+    #[arg(long)]
+    adapter: Option<PathBuf>,
     /// Optional tokenizer JSON path.
     #[arg(long)]
     tokenizer: Option<PathBuf>,
@@ -106,20 +112,23 @@ struct InferArgs {
     #[arg(long, default_value_t = false)]
     random: bool,
     /// Maximum generated token count.
-    #[arg(long, default_value_t = 32)]
-    max_new_tokens: usize,
+    #[arg(long)]
+    max_new_tokens: Option<usize>,
     /// Sampling temperature.
-    #[arg(long, default_value_t = 0.7)]
-    temperature: f64,
+    #[arg(long)]
+    temperature: Option<f64>,
     /// Nucleus sampling cutoff.
-    #[arg(long, default_value_t = 0.9)]
-    top_p: f64,
+    #[arg(long)]
+    top_p: Option<f64>,
     /// Top-k sampling cutoff.
-    #[arg(long, default_value_t = 0)]
-    top_k: usize,
+    #[arg(long)]
+    top_k: Option<usize>,
     /// Enables thinking-token generation mode.
     #[arg(long, default_value_t = false)]
     thinking: bool,
+    /// Enables multi-token-head speculative decoding when the model has draft heads.
+    #[arg(long, default_value_t = false)]
+    speculative: bool,
 }
 
 /// Inspect command arguments.
@@ -128,6 +137,12 @@ struct InspectArgs {
     /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional full-model safetensors path.
+    #[arg(long)]
+    weights: Option<PathBuf>,
+    /// Optional adapter-only safetensors path.
+    #[arg(long)]
+    adapter: Option<PathBuf>,
     /// Output format for inspection.
     #[arg(long, value_enum, default_value_t = InspectFormat::Text)]
     format: InspectFormat,
@@ -148,6 +163,12 @@ struct BenchmarkArgs {
     /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional full-model safetensors path.
+    #[arg(long)]
+    weights: Option<PathBuf>,
+    /// Optional adapter-only safetensors path.
+    #[arg(long)]
+    adapter: Option<PathBuf>,
     /// Number of synthetic sequences.
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
@@ -165,6 +186,12 @@ struct MergeAdapterArgs {
     /// Optional YAML config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional full-model safetensors path to load before merging.
+    #[arg(long)]
+    weights: Option<PathBuf>,
+    /// Optional adapter-only safetensors path to load before merging.
+    #[arg(long)]
+    adapter: Option<PathBuf>,
     /// Directory where merged artifacts are written.
     #[arg(long, default_value = "checkpoints/apex-rust/merged")]
     output_dir: PathBuf,
@@ -364,8 +391,15 @@ fn run_adapter_dpo(args: TrainArgs) -> Result<()> {
 /// Runs autoregressive generation from prompt text or synthetic token IDs.
 fn run_infer(args: InferArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
+    let generation = cfg.generation.clone();
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
     let mut model = ApexModel::new(cfg, Device::Cpu)?;
+    load_requested_tensors(
+        &mut model,
+        args.weights.as_deref(),
+        args.adapter.as_deref(),
+        true,
+    )?;
     let input = if args.random {
         synthetic_tokens(8, model.config.model.vocab_size)
     } else {
@@ -380,16 +414,20 @@ fn run_infer(args: InferArgs) -> Result<()> {
         )?
     };
     let gen_cfg = GenerationConfig {
-        max_new_tokens: args.max_new_tokens,
-        temperature: args.temperature,
-        top_p: args.top_p,
-        top_k: args.top_k,
-        enable_thinking: args.thinking,
+        max_new_tokens: args.max_new_tokens.unwrap_or(generation.max_new_tokens),
+        temperature: args.temperature.unwrap_or(generation.temperature),
+        top_p: args.top_p.unwrap_or(generation.top_p),
+        top_k: args.top_k.unwrap_or(generation.top_k),
+        repetition_penalty: generation.repetition_penalty,
+        enable_thinking: args.thinking || generation.enable_thinking,
+        max_thinking_tokens: generation.max_thinking_tokens,
+        thinking_temperature: generation.thinking_temperature,
+        output_temperature: generation.output_temperature,
         eos_token_id: tokenizer.eos_token_id(),
         pad_token_id: tokenizer.pad_token_id(),
         thinking_start_id: tokenizer.thinking_start_id(),
         thinking_end_id: tokenizer.thinking_end_id(),
-        ..GenerationConfig::default()
+        use_speculative: args.speculative || generation.use_speculative,
     };
     let mut generator = ApexGenerator::new(&mut model, gen_cfg);
     let out = generator.generate(input, 0)?;
@@ -405,7 +443,13 @@ fn run_infer(args: InferArgs) -> Result<()> {
 /// Prints model inspection in text or JSON form.
 fn run_inspect(args: InspectArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
-    let model = ApexModel::new(cfg, Device::Cpu)?;
+    let mut model = ApexModel::new(cfg, Device::Cpu)?;
+    load_requested_tensors(
+        &mut model,
+        args.weights.as_deref(),
+        args.adapter.as_deref(),
+        true,
+    )?;
     match args.format {
         InspectFormat::Text => {
             println!("{}", architecture_text(&model));
@@ -430,6 +474,12 @@ fn run_inspect(args: InspectArgs) -> Result<()> {
 fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    load_requested_tensors(
+        &mut model,
+        args.weights.as_deref(),
+        args.adapter.as_deref(),
+        true,
+    )?;
     let batch = (0..args.batch_size)
         .map(|_| synthetic_tokens(args.seq_len, cfg.model.vocab_size))
         .collect::<Vec<_>>();
@@ -448,6 +498,12 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
 fn run_merge_adapter(args: MergeAdapterArgs) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_lora_config)?;
     let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    load_requested_tensors(
+        &mut model,
+        args.weights.as_deref(),
+        args.adapter.as_deref(),
+        true,
+    )?;
     let before =
         model.count_lora_modules() + model.count_qlora_modules() + model.count_dora_modules();
     model.merge_and_unload_adapters()?;
@@ -485,6 +541,32 @@ fn load_config_or(path: Option<&Path>, default: impl FnOnce() -> ApexConfig) -> 
         Some(path) => ApexConfig::from_yaml(path),
         None => Ok(default()),
     }
+}
+
+/// Loads optional full-model and adapter safetensors into a constructed model.
+fn load_requested_tensors(
+    model: &mut ApexModel,
+    weights: Option<&Path>,
+    adapter: Option<&Path>,
+    strict: bool,
+) -> Result<()> {
+    if let Some(path) = weights {
+        let report = train::load_model_safetensors(path, model, strict)?;
+        info!(
+            "loaded model weights from {} ({} tensors)",
+            path.display(),
+            report.loaded
+        );
+    }
+    if let Some(path) = adapter {
+        let report = train::load_adapter_safetensors(path, model, strict)?;
+        info!(
+            "loaded adapter weights from {} ({} tensors)",
+            path.display(),
+            report.loaded
+        );
+    }
+    Ok(())
 }
 
 /// Builds deterministic synthetic token IDs within the configured vocabulary.

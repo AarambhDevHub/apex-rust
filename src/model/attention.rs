@@ -524,7 +524,9 @@ fn scaled_attention(
     mask: Option<&[Vec<bool>]>,
     scale_dim: usize,
 ) -> Result<Tensor> {
-    let mut scores = q.matmul(&k.transpose(2, 3)?)?;
+    let q = q.contiguous()?;
+    let k_t = k.transpose(2, 3)?.contiguous()?;
+    let mut scores = q.matmul(&k_t)?;
     scores = scores.broadcast_div(&tensor::scalar((scale_dim as f64).sqrt(), q.device())?)?;
     if let Some(mask) = mask {
         let q_len = q.dim(2)?;
@@ -533,5 +535,5 @@ fn scaled_attention(
         scores = scores.broadcast_add(&add)?;
     }
     let weights = tensor::softmax_last(&scores)?;
-    Ok(weights.matmul(v)?)
+    Ok(weights.contiguous()?.matmul(&v.contiguous()?)?)
 }
