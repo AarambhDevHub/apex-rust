@@ -49,7 +49,7 @@ Core capabilities:
 | Attention | Interleaved local GQA and global MLA |
 | FFN | Dense SwiGLU or sparse MoE |
 | Efficiency | GQA, sliding windows, MLA compression, skip gate, PEFT |
-| Vision | Native patch encoder + projector + visual-token insertion |
+| Vision | Native ViT encoder + projector + visual-token insertion |
 | Adaptation | LoRA, QLoRA, DoRA, QDoRA |
 | Artifacts | `model.safetensors`, optional `adapter.safetensors`, metadata |
 
@@ -177,7 +177,10 @@ Image tensor [B, C, H, W]
         │
         ▼
 NativeVisionEncoder
-        │ patch tokens [B, patches + cls, d_vision]
+        │ patch projection + CLS/position embeddings
+        │ ViT blocks × vision.n_layers
+        │ final norm
+        │ vision tokens [B, patches + cls, d_vision]
         ▼
 VisionToTextProjector
         │ visual tokens [B, n_visual_tokens, d_model]
@@ -412,10 +415,12 @@ Training utilities include:
 - vision SFT label expansion and loss
 - cosine warmup schedule
 - vector-backed AdamW update math and moment state
+- graph-preserving Candle losses for pretrain, SFT, DPO, and GRPO
+- Candle AdamW runners with LR scheduling and gradient clipping
 - global gradient norm calculation and clipping
 - gradient accumulation and best-validation-loss state helpers
 - checkpoint metadata
-- single-process CPU smoke runners
+- single-process CPU-first training runners
 
 Pretrain batches carry `input_ids` and `attention_mask`. The streaming iterator
 emits padded final chunks only when at least half a sequence remains, and masks
@@ -425,18 +430,22 @@ log-probability slicing. Vision collation formats text around `<|img|>` and
 creates labels with prompt positions set to `IGNORE_INDEX`; pixel loading stays
 inside `vision::ImagePreprocessor`.
 
-The optimizer utilities operate on flat `Vec<f32>` parameter and gradient
-buffers. This keeps AdamW, weight decay, clipping, and accumulation semantics
-testable on CPU while leaving full Candle autograd wiring as a future
-training-loop layer.
+The optimizer utilities include both flat `Vec<f32>` math for precise unit
+tests and Candle-backed AdamW runners for model training. The trainable-variable
+registry replaces eligible model tensors with Candle `Var` handles before a
+loop begins, so optimizer updates mutate the same tensors used by forward
+passes. Normal train commands update weights; `--dry-run` performs a no-update
+forward/loss/checkpoint smoke path.
 
 Alignment utilities include:
 
 - sequence log probability over response tokens
 - DPO loss
 - adapter-DPO step metrics
+- tensor-backed adapter-DPO training loss
 - GRPO-style normalized advantages
 - clipped policy loss helper
+- tensor-backed clipped GRPO policy loss
 - scalar reward model with last-non-padded hidden-state scoring
 - Bradley-Terry reward-model loss
 - process reward model that scores cumulative reasoning steps
@@ -523,17 +532,20 @@ src/model/
   skip_gate.rs
 
 src/vision/
+  block.rs
   preprocess.rs
   encoder.rs
   projector.rs
   wrapper.rs
 
 src/train/
+  autograd.rs
   losses.rs
   optimizer.rs
   scheduler.rs
   checkpoint.rs
   runner.rs
+  variables.rs
 
 src/tokenizer/
   constants.rs
@@ -551,6 +563,7 @@ src/utils/
   flops.rs
   diagram.rs
   shape.rs
+  runtime.rs
 ```
 
 Folder `mod.rs` files are intentionally small and only declare/re-export the
@@ -561,9 +574,13 @@ focused implementation files.
 ## 15. Runtime Boundaries
 
 - CPU execution is the validated baseline.
-- CUDA is not enabled by default.
-- Training commands run data loading, forward/loss paths, metadata writing, and
-  safetensors export.
+- `--device cpu` and `--device auto` resolve to CPU. `--device cuda` and
+  `--device cuda:<index>` are parsed but return a configuration error until a
+  Candle CUDA backend is enabled and validated in this crate.
+- `--mixed-precision fp32|fp16|bf16` is parsed. CPU execution uses fp32 compute;
+  fp16/bf16 requests report an explicit fp32 fallback.
+- Training commands run data loading, graph-preserving forward/loss paths,
+  optimizer updates, metadata writing, training reports, and safetensors export.
 - Checkpoints are native safetensors plus JSON/YAML sidecars and can be loaded
   by inference, inspection, benchmark, and adapter-merge commands.
 - Numeric outputs are determined by Rust initialization and Candle operations.

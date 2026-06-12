@@ -10,9 +10,10 @@ use apex_rust::generation::{ApexGenerator, GenerationConfig};
 use apex_rust::model::ApexModel;
 use apex_rust::tokenizer::{train_bpe_tokenizer, ApexTokenizer, ChatMessage};
 use apex_rust::train;
-use apex_rust::utils::{architecture_text, estimate_flops, ModelInspection};
+use apex_rust::utils::{
+    architecture_text, estimate_flops, resolve_runtime, ModelInspection, RuntimeBackend,
+};
 use apex_rust::Result;
-use candle_core::Device;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing::{info, Level};
 
@@ -24,6 +25,12 @@ struct Cli {
     /// Global tracing level.
     #[arg(long, global = true, default_value = "info")]
     log_level: String,
+    /// Runtime device: cpu, auto, cuda, or cuda:<index>.
+    #[arg(long, global = true, default_value = "auto")]
+    device: String,
+    /// Overrides config training.mixed_precision for runtime selection.
+    #[arg(long, global = true)]
+    mixed_precision: Option<String>,
     /// Subcommand to execute.
     #[command(subcommand)]
     command: Commands,
@@ -57,14 +64,16 @@ enum Commands {
 /// Training command variants.
 #[derive(Subcommand, Debug)]
 enum TrainCommand {
-    /// Language-model pretraining dry loop.
+    /// Language-model pretraining loop.
     Pretrain(TrainArgs),
-    /// Supervised fine-tuning dry loop.
+    /// Supervised fine-tuning loop.
     Sft(TrainArgs),
-    /// PEFT supervised fine-tuning dry loop.
+    /// PEFT supervised fine-tuning loop.
     PeftSft(TrainArgs),
-    /// Adapter-DPO dry loop.
+    /// Adapter-DPO preference training loop.
     AdapterDpo(TrainArgs),
+    /// Compact GRPO preference training loop.
+    Grpo(TrainArgs),
 }
 
 /// Shared training command arguments.
@@ -82,10 +91,10 @@ struct TrainArgs {
     /// Directory where artifacts are written.
     #[arg(long, default_value = "checkpoints/apex-rust")]
     output_dir: PathBuf,
-    /// Number of dry-loop steps to run.
+    /// Number of optimizer steps to run, or one smoke step with --dry-run.
     #[arg(long, default_value_t = 1)]
     steps: usize,
-    /// Stops after the first step.
+    /// Runs one forward/loss smoke step without optimizer updates.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 }
@@ -222,15 +231,28 @@ struct TokenizerTrainArgs {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
+    let runtime = resolve_runtime(&cli.device, cli.mixed_precision.as_deref())?;
+    log_runtime(&runtime);
     match cli.command {
-        Commands::Train { command } => run_train(command),
-        Commands::Infer(args) => run_infer(args),
-        Commands::Inspect(args) => run_inspect(args),
-        Commands::Benchmark(args) => run_benchmark(args),
-        Commands::MergeAdapter(args) => run_merge_adapter(args),
+        Commands::Train { command } => run_train(command, &runtime),
+        Commands::Infer(args) => run_infer(args, &runtime),
+        Commands::Inspect(args) => run_inspect(args, &runtime),
+        Commands::Benchmark(args) => run_benchmark(args, &runtime),
+        Commands::MergeAdapter(args) => run_merge_adapter(args, &runtime),
         Commands::Tokenizer { command } => match command {
             TokenizerCommand::Train(args) => run_tokenizer_train(args),
         },
+    }
+}
+
+/// Logs resolved device and precision settings.
+fn log_runtime(runtime: &RuntimeBackend) {
+    info!(
+        "runtime device={} precision={} compute_dtype={:?}",
+        runtime.device_label, runtime.precision_label, runtime.compute_dtype
+    );
+    if let Some(reason) = &runtime.fallback_reason {
+        info!("{reason}");
     }
 }
 
@@ -250,20 +272,21 @@ fn init_tracing(level: &str) {
 }
 
 /// Dispatches to the selected training mode.
-fn run_train(command: TrainCommand) -> Result<()> {
+fn run_train(command: TrainCommand, runtime: &RuntimeBackend) -> Result<()> {
     match command {
-        TrainCommand::Pretrain(args) => run_pretrain(args),
-        TrainCommand::Sft(args) => run_sft(args, false),
-        TrainCommand::PeftSft(args) => run_sft(args, true),
-        TrainCommand::AdapterDpo(args) => run_adapter_dpo(args),
+        TrainCommand::Pretrain(args) => run_pretrain(args, runtime),
+        TrainCommand::Sft(args) => run_sft(args, false, runtime),
+        TrainCommand::PeftSft(args) => run_sft(args, true, runtime),
+        TrainCommand::AdapterDpo(args) => run_adapter_dpo(args, runtime),
+        TrainCommand::Grpo(args) => run_grpo(args, runtime),
     }
 }
 
 /// Runs pretraining-style forward/loss steps and writes artifacts.
-fn run_pretrain(args: TrainArgs) -> Result<()> {
+fn run_pretrain(args: TrainArgs, runtime: &RuntimeBackend) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
-    let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    let mut model = ApexModel::new(cfg.clone(), runtime.device.clone())?;
     let samples = if let Some(path) = args.data.as_deref() {
         read_pretrain_jsonl(path, &tokenizer, cfg.training.seq_len)?
             .into_iter()
@@ -272,27 +295,26 @@ fn run_pretrain(args: TrainArgs) -> Result<()> {
     } else {
         vec![synthetic_tokens(cfg.training.seq_len, cfg.model.vocab_size)]
     };
-    let mut last_loss = 0.0;
-    for step in 0..args.steps.max(1) {
-        let batch = samples
-            .get(step % samples.len().max(1))
-            .cloned()
-            .unwrap_or_else(|| synthetic_tokens(cfg.training.seq_len, cfg.model.vocab_size));
-        let metrics = train::dry_run_pretrain_step(&mut model, &[batch])?;
-        last_loss = metrics.loss_total;
-        info!(
-            "pretrain step={} loss={:.4} valid_tokens={}",
-            step, metrics.loss_total, metrics.valid_tokens
-        );
-        if args.dry_run {
-            break;
-        }
-    }
-    write_train_outputs(&args.output_dir, &cfg, last_loss, &model)
+    let report = train::train_pretrain_steps(&mut model, &samples, args.steps, args.dry_run)?;
+    info!(
+        "pretrain steps={} optimizer_steps={} loss={:.4} grad_norm={:.4} trainable={}",
+        report.steps,
+        report.optimizer_steps,
+        report.final_loss,
+        report.final_grad_norm,
+        report.trainable_parameters
+    );
+    write_train_outputs(
+        &args.output_dir,
+        &cfg,
+        report.final_loss,
+        &model,
+        Some(&report),
+    )
 }
 
 /// Runs SFT or PEFT-SFT forward/loss steps and writes artifacts.
-fn run_sft(args: TrainArgs, peft: bool) -> Result<()> {
+fn run_sft(args: TrainArgs, peft: bool, runtime: &RuntimeBackend) -> Result<()> {
     let default_cfg = if peft {
         get_tiny_lora_config
     } else {
@@ -300,7 +322,7 @@ fn run_sft(args: TrainArgs, peft: bool) -> Result<()> {
     };
     let cfg = load_config_or(args.config.as_deref(), default_cfg)?;
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
-    let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    let mut model = ApexModel::new(cfg.clone(), runtime.device.clone())?;
     let samples = if let Some(path) = args.data.as_deref() {
         read_sft_jsonl(path, &tokenizer, cfg.training.seq_len)?
     } else {
@@ -311,41 +333,33 @@ fn run_sft(args: TrainArgs, peft: bool) -> Result<()> {
             token_types: types,
         }]
     };
-    let mut last_loss = 0.0;
-    for step in 0..args.steps.max(1) {
-        let sample = &samples[step % samples.len()];
-        let output = model.forward(
-            std::slice::from_ref(&sample.input_ids),
-            None,
-            0,
-            None,
-            false,
-        )?;
-        let metrics = train::compute_sft_loss(
-            &output.logits,
-            std::slice::from_ref(&sample.input_ids),
-            std::slice::from_ref(&sample.token_types),
-        )?;
-        last_loss = metrics.loss_total;
-        info!(
-            "sft step={} peft={} loss={:.4} valid_tokens={}",
-            step, peft, metrics.loss_total, metrics.valid_tokens
-        );
-        if args.dry_run {
-            break;
-        }
-    }
-    write_train_outputs(&args.output_dir, &cfg, last_loss, &model)
+    let report = train::train_sft_steps(&mut model, &samples, args.steps, args.dry_run)?;
+    info!(
+        "sft peft={} steps={} optimizer_steps={} loss={:.4} grad_norm={:.4} trainable={}",
+        peft,
+        report.steps,
+        report.optimizer_steps,
+        report.final_loss,
+        report.final_grad_norm,
+        report.trainable_parameters
+    );
+    write_train_outputs(
+        &args.output_dir,
+        &cfg,
+        report.final_loss,
+        &model,
+        Some(&report),
+    )
 }
 
 /// Runs adapter-DPO scoring steps and writes policy artifacts.
-fn run_adapter_dpo(args: TrainArgs) -> Result<()> {
+fn run_adapter_dpo(args: TrainArgs, runtime: &RuntimeBackend) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), || {
         get_tiny_adapter_dpo_config(PeftMethod::Dora)
     })?;
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
-    let mut policy = ApexModel::new(cfg.clone(), Device::Cpu)?;
-    let mut reference = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    let mut policy = ApexModel::new(cfg.clone(), runtime.device.clone())?;
+    let mut reference = ApexModel::new(cfg.clone(), runtime.device.clone())?;
     let samples = if let Some(path) = args.data.as_deref() {
         read_preference_jsonl(
             path,
@@ -364,36 +378,79 @@ fn run_adapter_dpo(args: TrainArgs) -> Result<()> {
             true,
         )?]
     };
-    let mut last_loss = 0.0;
-    for step in 0..args.steps.max(1) {
-        let sample = &samples[step % samples.len()];
-        let metrics = apex_rust::alignment::adapter_dpo_step(
-            &mut policy,
-            Some(&mut reference),
-            sample,
-            cfg.adapter_dpo.beta,
-            cfg.adapter_dpo.label_smoothing,
-            cfg.adapter_dpo.reference_free,
-            cfg.adapter_dpo.length_normalize,
-        )?;
-        last_loss = metrics.loss;
-        info!(
-            "adapter-dpo step={} loss={:.4} margin={:.4} acc={:.2}",
-            step, metrics.loss, metrics.reward_margin, metrics.accuracy
-        );
-        if args.dry_run {
-            break;
-        }
-    }
-    write_train_outputs(&args.output_dir, &cfg, last_loss, &policy)
+    let report = train::train_adapter_dpo_steps(
+        &mut policy,
+        Some(&mut reference),
+        &samples,
+        args.steps,
+        args.dry_run,
+    )?;
+    info!(
+        "adapter-dpo steps={} optimizer_steps={} loss={:.4} grad_norm={:.4} trainable={}",
+        report.steps,
+        report.optimizer_steps,
+        report.final_loss,
+        report.final_grad_norm,
+        report.trainable_parameters
+    );
+    write_train_outputs(
+        &args.output_dir,
+        &cfg,
+        report.final_loss,
+        &policy,
+        Some(&report),
+    )
+}
+
+/// Runs a compact GRPO preference-training loop and writes policy artifacts.
+fn run_grpo(args: TrainArgs, runtime: &RuntimeBackend) -> Result<()> {
+    let cfg = load_config_or(args.config.as_deref(), || {
+        get_tiny_adapter_dpo_config(PeftMethod::Lora)
+    })?;
+    let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
+    let mut policy = ApexModel::new(cfg.clone(), runtime.device.clone())?;
+    let samples = if let Some(path) = args.data.as_deref() {
+        read_preference_jsonl(
+            path,
+            &tokenizer,
+            cfg.adapter_dpo.max_prompt_len,
+            cfg.adapter_dpo.max_response_len,
+        )?
+    } else {
+        vec![apex_rust::data::format_preference_example(
+            &tokenizer,
+            "Explain APEX briefly.",
+            "APEX is an educational transformer model.",
+            "I cannot answer.",
+            cfg.adapter_dpo.max_prompt_len,
+            cfg.adapter_dpo.max_response_len,
+            true,
+        )?]
+    };
+    let report = train::train_grpo_steps(&mut policy, &samples, args.steps, args.dry_run)?;
+    info!(
+        "grpo steps={} optimizer_steps={} loss={:.4} grad_norm={:.4} trainable={}",
+        report.steps,
+        report.optimizer_steps,
+        report.final_loss,
+        report.final_grad_norm,
+        report.trainable_parameters
+    );
+    write_train_outputs(
+        &args.output_dir,
+        &cfg,
+        report.final_loss,
+        &policy,
+        Some(&report),
+    )
 }
 
 /// Runs autoregressive generation from prompt text or synthetic token IDs.
-fn run_infer(args: InferArgs) -> Result<()> {
+fn run_infer(args: InferArgs, runtime: &RuntimeBackend) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
     let generation = cfg.generation.clone();
     let tokenizer = ApexTokenizer::new(args.tokenizer.as_deref())?;
-    let mut model = ApexModel::new(cfg, Device::Cpu)?;
+    let mut model = ApexModel::new(cfg, runtime.device.clone())?;
     load_requested_tensors(
         &mut model,
         args.weights.as_deref(),
@@ -441,9 +498,9 @@ fn run_infer(args: InferArgs) -> Result<()> {
 }
 
 /// Prints model inspection in text or JSON form.
-fn run_inspect(args: InspectArgs) -> Result<()> {
+fn run_inspect(args: InspectArgs, runtime: &RuntimeBackend) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
-    let mut model = ApexModel::new(cfg, Device::Cpu)?;
+    let mut model = ApexModel::new(cfg, runtime.device.clone())?;
     load_requested_tensors(
         &mut model,
         args.weights.as_deref(),
@@ -471,9 +528,9 @@ fn run_inspect(args: InspectArgs) -> Result<()> {
 }
 
 /// Runs a forward-pass benchmark and prints JSON plus Markdown summaries.
-fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
+fn run_benchmark(args: BenchmarkArgs, runtime: &RuntimeBackend) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_config)?;
-    let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    let mut model = ApexModel::new(cfg.clone(), runtime.device.clone())?;
     load_requested_tensors(
         &mut model,
         args.weights.as_deref(),
@@ -495,9 +552,9 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
 }
 
 /// Merges adapters into base weights and writes merged checkpoint artifacts.
-fn run_merge_adapter(args: MergeAdapterArgs) -> Result<()> {
+fn run_merge_adapter(args: MergeAdapterArgs, runtime: &RuntimeBackend) -> Result<()> {
     let cfg = load_config_or(args.config.as_deref(), get_tiny_lora_config)?;
-    let mut model = ApexModel::new(cfg.clone(), Device::Cpu)?;
+    let mut model = ApexModel::new(cfg.clone(), runtime.device.clone())?;
     load_requested_tensors(
         &mut model,
         args.weights.as_deref(),
@@ -583,6 +640,7 @@ fn write_train_outputs(
     cfg: &ApexConfig,
     loss: f64,
     model: &ApexModel,
+    report: Option<&train::TrainingReport>,
 ) -> Result<()> {
     fs::create_dir_all(output_dir)?;
     cfg.to_yaml(output_dir.join("config.yaml"))?;
@@ -595,6 +653,12 @@ fn write_train_outputs(
         output_dir.join("README.md"),
         "APEX Rust checkpoint artifacts. Tensor payloads use safetensors with JSON metadata and YAML config sidecars.\n",
     )?;
+    if let Some(report) = report {
+        fs::write(
+            output_dir.join("training_report.json"),
+            serde_json::to_string_pretty(report)?,
+        )?;
+    }
     println!(
         "wrote training artifacts to {} (loss={:.4})",
         output_dir.display(),

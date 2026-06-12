@@ -57,13 +57,13 @@ inspectable implementation that builds and runs locally on CPU.
 | LoRA, QLoRA, DoRA, QDoRA wrappers | Complete |
 | 4-bit pack/unpack and quantize/dequantize helpers | Complete |
 | Adapter merge/unload | Complete |
-| Vision preprocessing, native patch encoder, and projector | Complete |
+| Vision preprocessing, native ViT encoder stack, and projector | Complete |
 | Safetensors model and adapter save/load | Complete |
 | Reward model, PRM, constitutional AI, combined reward | Complete |
 | Inspection, FLOPs, parameter, diagram, shape-check utilities | Complete |
-| AdamW math, gradient clipping, training-state helpers | Complete |
+| Candle AdamW loops, gradient clipping, training-state helpers | Complete |
 | Inspect, infer, benchmark, train, merge, tokenizer CLI | Complete |
-| CUDA backend | Not enabled by default |
+| CUDA backend | Explicitly guarded until locally validated |
 
 ---
 
@@ -132,7 +132,7 @@ src/
   vision/              Image preprocessing, encoder, projector, wrapper
   tokenizer/           Tokenizer runtime, special tokens, BPE trainer
   generation/          Sampling and autoregressive generation
-  train/               Losses, scheduler, checkpoint export, smoke runners
+  train/               Autograd losses, scheduler, checkpoint export, runners
   alignment/           DPO, GRPO, reward model, PRM, constitutional AI
   eval/                Metrics, perplexity, benchmark helpers
   tensor/              Candle tensor utilities
@@ -205,6 +205,16 @@ cargo run -- train pretrain --dry-run --steps 1
 cargo run -- train sft --data data/sft.jsonl --dry-run
 cargo run -- train peft-sft --dry-run
 cargo run -- train adapter-dpo --data data/preference.jsonl --dry-run
+cargo run -- train grpo --data data/preference.jsonl --dry-run
+```
+
+Run real single-process CPU optimizer steps:
+
+```bash
+cargo run -- train pretrain --steps 10 --output-dir checkpoints/pretrain
+cargo run -- train sft --data data/sft.jsonl --steps 10
+cargo run -- train peft-sft --config configs/tiny_lora.yaml --steps 10
+cargo run -- train adapter-dpo --config configs/tiny_lora_dpo.yaml --data data/preference.jsonl --steps 10
 ```
 
 Train a tokenizer:
@@ -273,12 +283,23 @@ apex-rust train pretrain      --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust train sft           --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust train peft-sft      --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust train adapter-dpo   --config <yaml> --data <jsonl> --output-dir <dir>
+apex-rust train grpo          --config <yaml> --data <jsonl> --output-dir <dir>
 apex-rust infer               --config <yaml> --weights <model.safetensors> --adapter <adapter.safetensors> --prompt <text> --speculative
 apex-rust inspect             --config <yaml> --weights <model.safetensors> --adapter <adapter.safetensors> --format text|json
 apex-rust benchmark           --config <yaml> --weights <model.safetensors> --seq-len <n> --repeats <n>
 apex-rust merge-adapter       --config <yaml> --weights <model.safetensors> --adapter <adapter.safetensors> --output-dir <dir>
 apex-rust tokenizer train     --input <text-file> --output <tokenizer.json>
 ```
+
+All model commands accept global runtime flags:
+
+```bash
+apex-rust --device auto --mixed-precision fp32 inspect
+```
+
+`cpu` and `auto` run on CPU. `cuda` and `cuda:<index>` are parsed but fail with
+a clear config error until a Candle CUDA feature is added and validated locally.
+On CPU, requested `fp16` or `bf16` falls back to fp32 compute.
 
 With no config path, commands use tiny defaults intended for CPU validation.
 
@@ -327,6 +348,7 @@ output/
   adapter.safetensors      # when PEFT is enabled
   metadata.json
   config.yaml
+  training_report.json     # train commands
   README.md
 ```
 
@@ -338,10 +360,11 @@ created from `--config`. QLoRA/QDoRA base weights are saved as dequantized F32
 and re-quantized into the configured 4-bit representation when loaded.
 
 The training support layer includes cosine warmup scheduling, loss functions,
-checkpoint writing, vector-backed AdamW update math, global gradient clipping,
-and gradient-accumulation state helpers. The current CLI training modes remain
-CPU smoke loops around forward/loss/checkpoint paths; full Candle autograd
-updates over every model tensor are a future integration layer.
+checkpoint writing, vector-backed AdamW update math, Candle AdamW loops, global
+gradient clipping, and gradient-accumulation state helpers. CLI training modes
+run single-process CPU-first optimizer steps for pretrain, SFT, PEFT-SFT,
+adapter-DPO, and compact preference-row GRPO. `--dry-run` keeps the old
+no-update smoke behavior.
 
 ---
 
@@ -357,9 +380,10 @@ cargo test
 The test suite covers config roundtrip, tokenizer/chat behavior, data readers,
 RoPE/YaRN, masks, RMSNorm, load balancer, full model forward/losses, PEFT
 insertion and merge, 4-bit quantization, generation sampling, data batching,
-streaming masks, vision-token insertion, safetensors save/load, DPO/GRPO
-helpers, reward/PRM scoring, constitutional critique, combined rewards, utility
-reports, shape verification, and CLI smoke tests.
+streaming masks, vision-token insertion, ViT encoder depth, safetensors
+save/load, autograd training runners, DPO/GRPO helpers, reward/PRM scoring,
+constitutional critique, combined rewards, runtime resolution, utility reports,
+shape verification, and CLI smoke tests.
 
 ---
 

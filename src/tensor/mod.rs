@@ -83,13 +83,7 @@ pub fn silu(x: &Tensor) -> Result<Tensor> {
 
 /// Applies approximate GELU activation.
 pub fn gelu(x: &Tensor) -> Result<Tensor> {
-    let dims = x.dims().to_vec();
-    let values = x.flatten_all()?.to_vec1::<f32>()?;
-    let out = values
-        .into_iter()
-        .map(|v| 0.5 * v * (1.0 + (0.797_884_6 * (v + 0.044_715 * v.powi(3))).tanh()))
-        .collect::<Vec<_>>();
-    Ok(Tensor::from_vec(out, dims.as_slice(), x.device())?)
+    Ok(x.gelu()?)
 }
 
 /// Applies the sigmoid activation.

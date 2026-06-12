@@ -334,23 +334,24 @@ pub fn cache_len(cache: &KvCache) -> usize {
 
 /// Converts token IDs into embedding rows.
 fn embed_tokens(embedding: &Tensor, token_ids: &[Vec<u32>]) -> Result<Tensor> {
-    let rows = embedding.to_vec2::<f32>()?;
     let b = token_ids.len();
     let s = token_ids[0].len();
     let d = embedding.dim(1)?;
-    let mut values = Vec::with_capacity(b * s * d);
+    let vocab = embedding.dim(0)?;
+    let mut ids = Vec::with_capacity(b * s);
     for row in token_ids {
         for &id in row {
             let idx = id as usize;
-            if idx >= rows.len() {
+            if idx >= vocab {
                 return Err(ApexError::Data(format!(
                     "token id {id} outside embedding vocab"
                 )));
             }
-            values.extend_from_slice(&rows[idx]);
+            ids.push(id);
         }
     }
-    Ok(Tensor::from_vec(values, (b, s, d), embedding.device())?)
+    let ids = Tensor::from_vec(ids, (b * s,), embedding.device())?;
+    Ok(embedding.index_select(&ids, 0)?.reshape((b, s, d))?)
 }
 
 /// Counts LoRA-family modules inside an attention layer.

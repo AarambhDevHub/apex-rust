@@ -4,6 +4,7 @@ mod diagram;
 mod flops;
 mod inspection;
 mod params;
+mod runtime;
 mod shape;
 
 pub use diagram::{build_architecture_diagram, build_layer_table};
@@ -15,4 +16,5 @@ pub use inspection::{architecture_text, inspection_markdown, LayerReport, ModelI
 pub use params::{
     format_parameter_count, parameter_summary_text, ParameterBreakdown, ParameterReport,
 };
+pub use runtime::{resolve_runtime, RuntimeBackend};
 pub use shape::{verify_shapes, ShapeVerificationReport};

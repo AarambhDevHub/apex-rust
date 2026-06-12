@@ -3,10 +3,12 @@ use candle_core::Tensor;
 
 use crate::config::ApexConfig;
 use crate::error::{ApexError, Result};
-use crate::model::PlainLinear;
+use crate::model::{PlainLinear, RmsNorm};
 use crate::tensor;
 
-/// Minimal native vision encoder that converts image patches into vision tokens.
+use super::block::VisionTransformerBlock;
+
+/// Native ViT encoder that converts image patches into contextual vision tokens.
 #[derive(Clone)]
 pub struct NativeVisionEncoder {
     /// Expected square image size.
@@ -23,6 +25,10 @@ pub struct NativeVisionEncoder {
     pub cls_token: Tensor,
     /// Learned positional embedding for CLS plus patch tokens.
     pub pos_embed: Tensor,
+    /// Transformer blocks that contextualize CLS and patch tokens.
+    pub blocks: Vec<VisionTransformerBlock>,
+    /// Final token normalization.
+    pub norm: RmsNorm,
 }
 
 impl NativeVisionEncoder {
@@ -45,6 +51,18 @@ impl NativeVisionEncoder {
             )?,
             cls_token: tensor::zeros(&[1, 1, v.d_vision], device)?,
             pos_embed: tensor::randn(&[1, n_patches + 1, v.d_vision], 0.0, 0.02, device)?,
+            blocks: (0..v.n_layers)
+                .map(|idx| {
+                    VisionTransformerBlock::new(
+                        &format!("vision.encoder.blocks.{idx}"),
+                        v.d_vision,
+                        v.n_heads,
+                        v.mlp_ratio,
+                        device,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+            norm: RmsNorm::new(v.d_vision, device)?,
         })
     }
 
@@ -88,12 +106,23 @@ impl NativeVisionEncoder {
         let patches = Tensor::from_vec(flattened, (b, n_patches, patch_dim), image.device())?;
         let patch_tokens = self.patch_proj.forward(&patches)?;
         let cls = self.cls_token.broadcast_as((b, 1, self.d_vision))?;
-        let tokens = Tensor::cat(&[&cls, &patch_tokens], 1)?;
-        Ok(tokens.broadcast_add(&self.pos_embed)?)
+        let mut tokens = Tensor::cat(&[&cls, &patch_tokens], 1)?.broadcast_add(&self.pos_embed)?;
+        for block in &self.blocks {
+            tokens = block.forward(&tokens)?;
+        }
+        self.norm.forward(&tokens)
     }
 
     /// Returns the number of vision encoder parameters.
     pub fn parameters(&self) -> usize {
-        self.patch_proj.parameters() + self.cls_token.elem_count() + self.pos_embed.elem_count()
+        self.patch_proj.parameters()
+            + self.cls_token.elem_count()
+            + self.pos_embed.elem_count()
+            + self
+                .blocks
+                .iter()
+                .map(VisionTransformerBlock::parameters)
+                .sum::<usize>()
+            + self.norm.parameters()
     }
 }
